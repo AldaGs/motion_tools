@@ -1,0 +1,342 @@
+/* src/App.css — panel-specific utilities + animations.
+   Theme tokens live in index.css. */
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* --- press feedback for buttons & pressable elements --- */
+button {
+  transition: transform 90ms ease-out, background-color 120ms ease-out, color 120ms ease-out, opacity 150ms ease-out;
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.mt-press {
+  transition: transform 90ms ease-out, box-shadow 120ms ease-out, filter 120ms ease-out;
+}
+
+.mt-press:hover {
+  filter: brightness(1.15);
+}
+
+.mt-press:active {
+  transform: scale(0.97);
+}
+
+/* --- macro tile (static layout) ---
+   The per-macro color travels in via the `--mt-color` CSS custom property,
+   which keeps the inline style object tiny — React's style-diff on every
+   drag/hover update only sees the props that actually change. */
+.mt-tile {
+  position: relative;
+  color: #fff;
+  padding: 10px 8px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  text-align: center;
+  user-select: none;
+  overflow: visible;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  cursor: pointer;
+  border: 1px solid var(--mt-color, var(--panel-border));
+  background-color: color-mix(in srgb, var(--mt-color, transparent) 25%, transparent);
+}
+
+/* Fallback for CEF builds without color-mix support — applied via inline
+   style on the element. The class default above is still safe. */
+
+.mt-tile.is-edit {
+  cursor: grab;
+}
+
+.mt-tile.is-ghost {
+  background-color: transparent;
+}
+
+.mt-tile.is-dragging {
+  opacity: 0.4;
+}
+
+.mt-tile[data-drop-side="left"] {
+  box-shadow: inset 4px 0 0 var(--accent);
+}
+
+.mt-tile[data-drop-side="right"] {
+  box-shadow: inset -4px 0 0 var(--accent);
+}
+
+.mt-tile-label {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mt-hotkey-badge {
+  position: absolute;
+  bottom: -4px;
+  right: -4px;
+  z-index: 2;
+  font-size: 8px;
+  padding: 1px 4px;
+  background-color: var(--panel-bg);
+  color: var(--panel-fg-muted);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  line-height: 1.2;
+}
+
+.mt-tile-badge {
+  position: absolute;
+  z-index: 2;
+  border-radius: 50%;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 0 0 2px var(--panel-bg);
+  transition: top 0.15s, left 0.15s, right 0.15s, width 0.15s, height 0.15s,
+    background-color 0.15s, color 0.15s, font-size 0.15s, box-shadow 0.15s;
+}
+
+.mt-tile-badge.is-move {
+  top: -7px;
+  left: -7px;
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
+  background-color: var(--accent);
+  color: #fff;
+}
+
+.mt-tile-badge.is-delete {
+  top: -7px;
+  right: -7px;
+  width: 16px;
+  height: 16px;
+  font-size: 10px;
+  background-color: var(--danger);
+  color: #fff;
+}
+
+.mt-tile-badge.is-delete.is-confirming {
+  top: -9px;
+  right: -9px;
+  width: 20px;
+  height: 20px;
+  font-size: 12px;
+  background-color: #fff;
+  color: var(--danger);
+  box-shadow: 0 0 0 2px var(--danger), 0 0 0 4px var(--panel-bg);
+}
+
+.mt-add-tile {
+  border: 1px dashed var(--panel-fg-dim);
+  color: var(--panel-fg-dim);
+  padding: 12px 8px;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: 12px;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* --- modal entrance: fade + tiny scale-up --- */
+@keyframes mt-modal-in {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* --- toast entrance / exit --- */
+@keyframes mt-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes mt-toast-out {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+}
+
+/* --- preset selection pop --- */
+@keyframes mt-pop {
+  0% {
+    transform: scale(1);
+  }
+
+  45% {
+    transform: scale(1.12);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* --- easing handle grab pulse --- */
+@keyframes mt-handle-pulse {
+
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+
+  50% {
+    opacity: 0.0;
+  }
+}
+
+/* --- generic fade-in for panel content --- */
+@keyframes mt-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.mt-fade-in {
+  animation: mt-fade-in 220ms ease-out both;
+}
+
+/* --- edit-mode wiggle for macro tiles ---
+   Two slightly-out-of-phase keyframes alternated by :nth-child so adjacent
+   tiles aren't perfectly synced. Subtle rotation only — no translation, so it
+   doesn't fight grid layout. Durations are 0.7-0.9s (iOS-style); the previous
+   0.2s read as a vibration and amplified any frame drop. Negative
+   animation-delays via :nth-child stagger phases at startup so tiles don't
+   all peak on the same frame. */
+@keyframes mt-wiggle-a {
+
+  0%,
+  100% {
+    transform: rotate(-1deg);
+  }
+
+  50% {
+    transform: rotate(1deg);
+  }
+}
+
+@keyframes mt-wiggle-b {
+
+  0%,
+  100% {
+    transform: rotate(1deg);
+  }
+
+  50% {
+    transform: rotate(-1deg);
+  }
+}
+
+.mt-wiggle {
+  animation: mt-wiggle-a 0.25s ease-in-out infinite;
+  transform-origin: center center;
+  will-change: transform;
+}
+
+.mt-wiggle:nth-child(even) {
+  animation: mt-wiggle-b 0.85s ease-in-out infinite;
+}
+
+.mt-wiggle:nth-child(3n) {
+  animation-duration: 0.65s;
+}
+
+/* Phase-stagger: each tile starts a different fraction into its loop so the
+   grid doesn't pulse in unison. Negative delays start mid-animation. */
+.mt-wiggle:nth-child(2n) {
+  animation-delay: -0.10s;
+}
+
+.mt-wiggle:nth-child(3n) {
+  animation-delay: -0.25s;
+}
+
+.mt-wiggle:nth-child(5n) {
+  animation-delay: -0.40s;
+}
+
+.mt-wiggle:nth-child(7n) {
+  animation-delay: -0.55s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+  .mt-wiggle,
+  .mt-wiggle:nth-child(even),
+  .mt-wiggle:nth-child(3n) {
+    animation: none;
+  }
+}
+
+/* Hide arrows on number inputs */
+.minimal-input::-webkit-outer-spin-button,
+.minimal-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  appearance: none;
+  margin: 0;
+}
+
+.minimal-input {
+  -moz-appearance: textfield;
+  /* Firefox fallback */
+  appearance: textfield;
+  outline: none;
+  /* Removes the harsh blue glow when clicked */
+}
+
+/* Optional: Add a subtle hover effect so users know they can click it */
+.minimal-input:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+  border-radius: 3px;
+}
+
+.minimal-input:focus {
+  background-color: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  color: #fff !important;
+  /* Brighten text when typing */
+}
