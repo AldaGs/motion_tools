@@ -2,7 +2,7 @@
 
 Motion Toolbar is a premium, high-performance CEP extension designed to streamline the workflow of professional motion designers. It combines a highly configurable macro dashboard with a math-accurate, industry-standard Easing Editor.
 
-![Motion Toolbar Preview](https://via.placeholder.com/800x400?text=Motion+Toolbar+Interface+Preview)
+![Motion Toolbar Preview](./public/snap.png)
 
 ## 🚀 Key Features
 
