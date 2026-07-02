@@ -1,11 +1,16 @@
 // jsx/hostscript.jsx
 
-// `openedHere` (declared at the top of executeAction) tracks how many undo
-// groups *this invocation* opened so the catch block can close exactly that
-// many on failure — avoiding "endUndoGroup without a matching begin" errors
-// when sequences nest.
+// Module-level flag: true while an undo group is already open by our code.
+// Functions that open their own undo group (applyBezierToSelection, etc.)
+// check this to avoid nesting, which causes the "Mismatch" dialog in AE.
+var _insideUndo = false;
 
-function executeAction(actionString) {
+// `_skipUndo` (optional, default false): when true the function executes the
+// action logic without opening/closing an undo group.  Used by `sequence`
+// processing so sub-steps run inside the sequence's single undo group
+// instead of nesting their own (nesting + menu commands = Mismatch dialog).
+
+function executeAction(actionString, _skipUndo) {
     var openedHere = 0;
     try {
         // ExtendScript requires a little help with JSON sometimes
@@ -17,8 +22,17 @@ function executeAction(actionString) {
             action = eval("(" + actionString + ")");
         }
 
-        app.beginUndoGroup(action.label || "Motion Toolbar Action");
-        openedHere++;
+        // Menu commands (app.executeCommand) and external scripts ($.evalFile)
+        // manage their own undo groups internally — wrapping them in ours
+        // creates nesting mismatches that trigger AE's "Mismatch" dialog.
+        // When _skipUndo is true we also skip (we're inside a sequence's
+        // group already).
+        var needsUndo = !_skipUndo && action.type !== 'menuCommand' && action.type !== 'script';
+        if (needsUndo) {
+            app.beginUndoGroup(action.label || "Motion Toolbar Action");
+            openedHere++;
+            _insideUndo = true;
+        }
         
         if (action.type === 'menuCommand') {
             // Stable menu command: try name-based lookup first, fall back to numeric ID
@@ -34,8 +48,6 @@ function executeAction(actionString) {
                     // are not stable across versions, so warn loudly. We still
                     // attempt the call; the caller can decide what to do.
                     app.executeCommand(cmdId);
-                    app.endUndoGroup();
-                    openedHere--;
                     return "Warning: Used numeric menu ID fallback (" + cmdId +
                            ") for \"" + action.menuCommandName +
                            "\". This AE version lacks findMenuCommandId; the action may target a different command.";
@@ -88,12 +100,19 @@ function executeAction(actionString) {
             }
 
         } else if (action.type === 'sequence') {
-            // Execute a sequence of sub-actions
+            // Execute a sequence of sub-actions inside ONE undo group.
             var seq;
             try {
                 seq = (typeof action.payload === 'string') ? JSON.parse(action.payload) : action.payload;
             } catch(e) {
                 return "Error: Invalid sequence payload.";
+            }
+            // Open a single undo group for the entire sequence (unless we're
+            // already inside one from a parent sequence).
+            if (!_skipUndo && openedHere === 0) {
+                app.beginUndoGroup(action.label || "Motion Toolbar Sequence");
+                openedHere++;
+                _insideUndo = true;
             }
             if (seq && seq.steps && seq.steps.length > 0) {
                 for (var i = 0; i < seq.steps.length; i++) {
@@ -103,16 +122,43 @@ function executeAction(actionString) {
                         if (seq.delayMs && i > 0) {
                             $.sleep(seq.delayMs);
                         }
-                        // Each sub-step opens its own paired begin/end via the
-                        // recursive call — no need to bracket the call ourselves.
-                        executeAction(JSON.stringify(step));
+
+                        // Scripts ($.evalFile) and menu commands each manage
+                        // their own undo group internally.  If the sequence's
+                        // group is still open, AE sees a nested
+                        // beginUndoGroup and eventually throws "Mismatch".
+                        // Fix: close our group before the step, let it run
+                        // with its own undo, then re-open for subsequent
+                        // non-command steps.
+                        var selfManaged = (step.type === 'script' || step.type === 'menuCommand');
+                        if (selfManaged && openedHere > 0) {
+                            app.endUndoGroup();
+                            openedHere--;
+                            _insideUndo = false;
+                        }
+
+                        // Sub-steps run with _skipUndo=true — they execute
+                        // their logic but don't open nested undo groups
+                        // (only relevant for non-self-managed types).
+                        executeAction(JSON.stringify(step), true);
+
+                        // Re-open the sequence undo group for remaining steps
+                        // (only if we had one and there are more steps ahead).
+                        if (selfManaged && !_skipUndo && i < seq.steps.length - 1) {
+                            app.beginUndoGroup(action.label || "Motion Toolbar Sequence");
+                            openedHere++;
+                            _insideUndo = true;
+                        }
                     }
                 }
             }
         }
 
-        app.endUndoGroup();
-        openedHere--;
+        if (openedHere > 0) {
+            app.endUndoGroup();
+            openedHere--;
+            _insideUndo = false;
+        }
         return "Success";
 
     } catch (err) {
@@ -121,6 +167,7 @@ function executeAction(actionString) {
             try { app.endUndoGroup(); } catch(e) {}
             openedHere--;
         }
+        _insideUndo = false;
         return "Error: " + err.toString();
     }
 
@@ -197,7 +244,14 @@ function applyBezierToSelection(bezierString, applyMode) {
         var sawAnyKeys = false;
         var sawAnyApplied = false;
 
-        app.beginUndoGroup("Apply Custom Ease");
+        // Only open an undo group if we're not already inside one (e.g. from
+        // a sequence macro). Nesting beginUndoGroup causes AE's "Mismatch"
+        // dialog on random occasions.
+        var ownUndo = !_insideUndo;
+        if (ownUndo) {
+            app.beginUndoGroup("Apply Custom Ease");
+            _insideUndo = true;
+        }
         var props = comp.selectedProperties;
 
         for (var i = 0; i < props.length; i++) {
@@ -261,13 +315,20 @@ function applyBezierToSelection(bezierString, applyMode) {
                 }
             }
         }
-        app.endUndoGroup();
+        if (ownUndo) {
+            app.endUndoGroup();
+            _insideUndo = false;
+        }
         if (!sawAnyKeys)    return "Error: Select at least one keyframe.";
         if (!sawAnyApplied) return "Error: Selected keyframe has no neighbor on the requested side.";
         return "Success";
     } catch (err) {
-        if (app.project.activeItem) {
+        // Only attempt to close the group if WE opened it.
+        if (!_insideUndo) {
+            // Already closed or never opened — nothing to do.
+        } else {
             try { app.endUndoGroup(); } catch(e) {}
+            _insideUndo = false;
         }
         return "Easing Error: " + err.toString();
     }
@@ -467,7 +528,211 @@ function browseForScript() {
     var file = File.openDialog("Select an After Effects Script", "*.jsx;*.jsxbin");
     if (file) {
         // Return the properly formatted file path
-        return file.fsName.replace(/\\/g, "/"); 
+        return file.fsName.replace(/\\/g, "/");
     }
     return ""; // User clicked cancel
+}
+
+// ==========================================================================
+// COLOR PALETTE — apply/extract colors on the current selection.
+// Ported from AG Color Palette. AE color arrays are 0..1 floats; the panel
+// speaks 6-digit hex. Public entry points return a plain string the panel
+// parses: "Error:..." / "Warning:..." are surfaced as toasts, a JSON array is
+// the extraction result.
+// ==========================================================================
+
+function _colHexToRGB(hex) {
+    hex = String(hex).replace(/^#/, "");
+    if (hex.length === 3) hex = hex.charAt(0)+hex.charAt(0)+hex.charAt(1)+hex.charAt(1)+hex.charAt(2)+hex.charAt(2);
+    return [
+        parseInt(hex.substr(0, 2), 16) / 255,
+        parseInt(hex.substr(2, 2), 16) / 255,
+        parseInt(hex.substr(4, 2), 16) / 255
+    ];
+}
+function _colValueToHex(c) {
+    if (c === undefined || isNaN(c)) c = 0;
+    if (c > 1.0 && c <= 255) c = c / 255;
+    var v = Math.max(0, Math.min(1, c));
+    var s = Math.round(v * 255).toString(16);
+    return (s.length === 1 ? "0" + s : s).toUpperCase();
+}
+function _colRgbToHex(rgb) {
+    if (!rgb || rgb.length < 3) return "000000";
+    return _colValueToHex(rgb[0]) + _colValueToHex(rgb[1]) + _colValueToHex(rgb[2]);
+}
+
+function _colComp() {
+    var comp = app.project.activeItem;
+    return (comp && comp instanceof CompItem) ? comp : null;
+}
+
+// --- Shape-layer traversal helpers (recursive over the vector tree) ---
+function _colFindClosestShapeGroup(prop, delimiter) {
+    if (prop.matchName == "ADBE Vectors Group" || prop.matchName == "ADBE Vector Group" || prop.matchName == "ADBE Vector Layer") {
+        return (prop.matchName == "ADBE Vector Layer") ? prop.property("ADBE Root Vectors Group") : prop;
+    }
+    for (var i = 1; i <= delimiter; i++) {
+        var groupParent = prop.propertyGroup(i);
+        if (groupParent.matchName == "ADBE Vectors Group" || groupParent.matchName == "ADBE Vector Group" || groupParent.matchName == "ADBE Vector Layer") {
+            return (groupParent.matchName == "ADBE Vector Layer") ? groupParent.property("ADBE Root Vectors Group") : groupParent;
+        }
+    }
+    return false;
+}
+function _colContents(content, object, matchNameFill, matchNameStroke) {
+    if (content.matchName == matchNameFill || content.matchName == matchNameStroke) {
+        if (content.propertyGroup().enabled) {
+            var color = _colRgbToHex(content.value);
+            object[color] = color;
+        }
+    }
+    if (content.numProperties == null) return;
+    for (var i = 1; i <= content.numProperties; i++) _colContents(content.property(i), object, matchNameFill, matchNameStroke);
+}
+function _colSearchInContents(content, theMatchName, arr) {
+    if (content.matchName == theMatchName) { arr.push(true); arr.length = 1; }
+    if (content.numProperties == null) return;
+    for (var i = 1; i <= content.numProperties; i++) _colSearchInContents(content.property(i), theMatchName, arr);
+}
+function _colApplyToContents(content, color, theMatchName) {
+    if (theMatchName.match("Fill") && content.enabled == false && content.matchName == "ADBE Vector Graphic - Fill") content.enabled = true;
+    if (theMatchName.match("Stroke") && content.enabled == false && content.matchName == "ADBE Vector Graphic - Stroke") content.enabled = true;
+    if (content.matchName == theMatchName) {
+        if (content.numKeys > 0) content.setValueAtTime(_colComp().time, color);
+        else content.setValue(color);
+    }
+    if (content.numProperties == null) return;
+    for (var i = 1; i <= content.numProperties; i++) _colApplyToContents(content.property(i), color, theMatchName);
+}
+
+function _colApplyShapeLayer(layer, color, fill) {
+    var layerProps = layer.selectedProperties;
+    var match = fill ? "ADBE Vector Fill Color" : "ADBE Vector Stroke Color";
+    if (layerProps.length > 0) {
+        for (var j = 0; j < layerProps.length; j++) {
+            var layerContent = _colFindClosestShapeGroup(layerProps[j], layerProps[j].propertyDepth);
+            if (layerContent) {
+                var arr = [];
+                _colSearchInContents(layerContent, match, arr);
+                if (arr.length == 0) {
+                    var newProp;
+                    if (layerContent.matchName == "ADBE Vector Group") {
+                        newProp = layerContent.property("ADBE Vectors Group").addProperty(fill ? "ADBE Vector Graphic - Fill" : "ADBE Vector Graphic - Stroke");
+                        newProp.enabled = true;
+                        if (!fill) newProp.property("ADBE Vector Composite Order").setValue(2);
+                    } else {
+                        newProp = layerContent.addProperty(fill ? "ADBE Vector Graphic - Fill" : "ADBE Vector Graphic - Stroke");
+                        if (!fill) { newProp.enabled = true; newProp.property("ADBE Vector Composite Order").setValue(2); }
+                    }
+                }
+                _colApplyToContents(layerContent, color, match);
+            }
+        }
+    } else {
+        var root = layer.property("ADBE Root Vectors Group");
+        var a2 = [];
+        _colSearchInContents(root, match, a2);
+        if (a2.length == 0) root.addProperty(fill ? "ADBE Vector Graphic - Fill" : "ADBE Vector Graphic - Stroke");
+        _colApplyToContents(root, color, match);
+    }
+}
+function _colApplyAvLayer(layer, color, fill) {
+    var enabledMatch = fill ? "solidFill/enabled" : "frameFX/enabled";
+    var layerContent = layer.property("ADBE Layer Styles");
+    if (!layerContent.enabled || !layerContent.property(enabledMatch).enabled) {
+        app.executeCommand(fill ? 9006 : 9008);
+    }
+    var colorMatch = fill ? "solidFill/color" : "frameFX/color";
+    var layerStyle = fill ? layerContent.property("solidFill/enabled") : layerContent.property("frameFX/enabled");
+    if (layerStyle.property(colorMatch).numKeys > 0) layerStyle.property(colorMatch).setValueAtTime(_colComp().time, color);
+    else layerStyle.property(colorMatch).setValue(color);
+}
+function _colApplyTextLayer(layer, rgb, fill) {
+    var source = layer.property("ADBE Text Properties").property("ADBE Text Document");
+    var doc = source.value;
+    var color = [rgb[0], rgb[1], rgb[2]];
+    if (fill) { doc.applyFill = true; doc.fillColor = color; }
+    else { doc.applyStroke = true; doc.strokeColor = color; }
+    if (source.numKeys > 0) source.setValueAtTime(_colComp().time, doc);
+    else source.setValue(doc);
+}
+
+// mode: "fill" | "stroke". Returns a status string for the panel.
+function applyColorToSelection(hex, mode) {
+    try {
+        var comp = _colComp();
+        if (!comp) return "Warning:Open a composition first.";
+        var layers = comp.selectedLayers;
+        if (!layers || !layers[0]) return "Warning:Select at least one layer.";
+
+        var fill = (mode !== "stroke");
+        var color = _colHexToRGB(hex);
+        var touched = 0;
+
+        app.beginUndoGroup("Apply Palette Color (" + (fill ? "Fill" : "Stroke") + ")");
+        try {
+            for (var i = 0; i < layers.length; i++) {
+                var mn = layers[i].matchName;
+                if (mn == "ADBE Vector Layer") { _colApplyShapeLayer(layers[i], color, fill); touched++; }
+                else if (mn == "ADBE AV Layer") { _colApplyAvLayer(layers[i], color, fill); touched++; }
+                else if (mn == "ADBE Text Layer") { _colApplyTextLayer(layers[i], color, fill); touched++; }
+            }
+        } finally {
+            app.endUndoGroup();
+        }
+
+        if (touched === 0) return "Warning:No shape, text, or solid/footage layers in the selection.";
+        return (fill ? "Fill" : "Stroke") + " applied to " + touched + " layer" + (touched === 1 ? "" : "s") + ".";
+    } catch (e) {
+        return "Error:" + e.toString();
+    }
+}
+
+// Returns a JSON array of unique hex strings (no '#'), or "Error:"/"Warning:".
+function extractColorsFromSelection() {
+    try {
+        var comp = _colComp();
+        if (!comp) return "Warning:Open a composition first.";
+        var layers = comp.selectedLayers;
+        if (!layers || !layers[0]) return "Warning:Select at least one layer.";
+
+        var obj = {};
+        for (var i = 0; i < layers.length; i++) {
+            var layer = layers[i];
+            if (layer.matchName == "ADBE Vector Layer") {
+                var lp = layer.selectedProperties;
+                if (lp.length > 0) {
+                    for (var j = 0; j < lp.length; j++) {
+                        var lc = _colFindClosestShapeGroup(lp[j], lp[j].propertyDepth);
+                        if (lc) _colContents(lc, obj, "ADBE Vector Fill Color", "ADBE Vector Stroke Color");
+                    }
+                } else {
+                    _colContents(layer.property("ADBE Root Vectors Group"), obj, "ADBE Vector Fill Color", "ADBE Vector Stroke Color");
+                }
+            } else if (layer.matchName == "ADBE AV Layer") {
+                var styles = layer.property("ADBE Layer Styles");
+                if (styles && styles.property("solidFill/enabled") && styles.property("solidFill/enabled").enabled) {
+                    _colContents(styles, obj, "solidFill/color", "solidFill/color");
+                }
+                if (styles && styles.property("frameFX/enabled") && styles.property("frameFX/enabled").enabled) {
+                    _colContents(styles, obj, "frameFX/color", "frameFX/color");
+                }
+            } else if (layer.matchName == "ADBE Text Layer") {
+                var src = layer.property("ADBE Text Properties").property("ADBE Text Document").value;
+                if (src.applyFill) { var cf = _colRgbToHex(src.fillColor); obj[cf] = cf; }
+                if (src.applyStroke) { var cs = _colRgbToHex(src.strokeColor); obj[cs] = cs; }
+            }
+        }
+
+        var arr = [];
+        for (var k in obj) { if (obj.hasOwnProperty(k)) arr.push(k); }
+        return "[" + (function () {
+            var parts = [];
+            for (var n = 0; n < arr.length; n++) parts.push('"' + arr[n] + '"');
+            return parts.join(",");
+        })() + "]";
+    } catch (e) {
+        return "Error:" + e.toString();
+    }
 }

@@ -104,7 +104,7 @@ export default function DialogApp() {
   useEffect(() => {
     // Initial load
     setAppData(loadConfig());
-    
+
     const data = getDialogPayload();
     if (data) {
       if (data.mode === 'settings') {
@@ -131,9 +131,12 @@ export default function DialogApp() {
         }
       }
     } else {
-      if (typeof window.__adobe_cep__ === 'undefined') {
-        setDialogMode('settings');
-      }
+      // No payload was written — likely the user opened the dialog panel
+      // directly from AE's Window menu instead of via the Settings button.
+      // Default to the settings UI so they aren't stranded on "Waiting for
+      // data…". The previous behaviour only fell back when CEP was absent,
+      // which left the in-AE case stuck.
+      setDialogMode('settings');
     }
   }, []);
 
@@ -158,14 +161,14 @@ export default function DialogApp() {
   const updateMacro = (updates: Partial<Omit<Macro, 'id'>>) => {
     const updated = { ...newMacro, ...updates };
     setNewMacro(updated);
-    
+
     if (!appData || !editingMacroId) return;
     const profileIndex = appData.profiles.findIndex((p) => p.id === appData.activeProfileId);
     if (profileIndex < 0) return;
     const macros = [...appData.profiles[profileIndex].macros];
     const mIdx = macros.findIndex((m) => m.id === editingMacroId);
     const macroPayload = { ...updated, id: editingMacroId };
-    
+
     if (mIdx >= 0) {
       macros[mIdx] = macroPayload;
     } else {
@@ -419,7 +422,13 @@ export default function DialogApp() {
     try {
       if (typeof window.CSInterface !== 'undefined') {
         const cs = new window.CSInterface();
-        const userData = cs.getSystemPath(window.SystemPath.USER_DATA);
+        // Same normalization as storage.ts — strip "file://", decode %20,
+        // drop the leading slash from "/C:/...". Some CEP versions return
+        // a URL here, others a plain path.
+        let userData = String(cs.getSystemPath(window.SystemPath.USER_DATA) || '');
+        userData = userData.replace(/^file:\/{0,3}/i, '');
+        try { userData = decodeURIComponent(userData); } catch {}
+        if (/^\/[A-Za-z]:\//.test(userData)) userData = userData.slice(1);
         return (userData + '/AGS-Extensions').replace(/\\/g, '/');
       }
     } catch (e) { /* fall through */ }
@@ -550,7 +559,10 @@ export default function DialogApp() {
       if (!read || read.err !== 0 || typeof read.data !== 'string') { toast.error("Could not read file."); return; }
 
       const parsed = parseEasingFile(read.data);
-      if (!parsed.ok) { toast.error(parsed.error); return; }
+      if ('error' in parsed) {
+        toast.error(parsed.error);
+        return;
+      }
 
       const existing = appData.settings.customEases ?? [];
       const merged = mergeEasesUnique(parsed.eases, existing);
@@ -569,7 +581,7 @@ export default function DialogApp() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: 'var(--panel-bg-elev)', color: 'var(--panel-fg)', overflow: 'hidden' }}>
-      
+
       {/* Draggable Header — no custom close button: AE's titlebar X is the
           single close affordance. unload/beforeunload/pagehide handlers above
           turn that into a Cancel for macro mode automatically. */}
@@ -580,294 +592,294 @@ export default function DialogApp() {
       </div>
 
       <div style={{ flex: 1, overflowY: 'auto' }}>
-      
-      {dialogMode === 'macro' && (
-        <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          <h4 style={{ margin: 0, fontSize: '14px', color: 'var(--panel-fg)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '8px' }}>{originalMacro.current ? 'Edit Tool' : 'Create New Tool'}</h4>
-          <input type="text" placeholder="Button Label" value={newMacro.label} onChange={(e) => updateMacro({ label: e.target.value })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }} />
-          <select value={newMacro.type} onChange={(e) => updateMacro({ type: e.target.value as MacroType, payload: '' })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }}>
-            <option value="menuCommand">Menu Command (ID)</option>
-            <option value="expression">Expression Code</option>
-            <option value="script">Run Script (.jsx)</option>
-            <option value="ffx">Effect Preset (.ffx)</option>
-            <option value="sequence">Sequence (Chain)</option>
-          </select>
-          {newMacro.type === 'expression' ? (
-             <textarea rows={5} placeholder="Expression..." value={newMacro.payload} onChange={(e) => updateMacro({ payload: e.target.value })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', fontFamily: 'monospace', resize: 'vertical' }} />
-          ) : newMacro.type === 'sequence' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <span style={{ fontSize: '11px', color: 'var(--panel-fg-muted)' }}>
-                <strong>JSON Chain:</strong> {"{ \"steps\": [ { \"type\": \"...\", \"payload\": \"...\" } ], \"delayMs\": 50 }"}
-              </span>
-              <textarea rows={4} placeholder='{"steps":[{"type":"menuCommand","payload":"2767","menuCommandName":"Separate Dimensions"},{"type":"expression","payload":"wiggle(5, 50)"}],"delayMs":100}' value={newMacro.payload} onChange={(e) => updateMacro({ payload: e.target.value })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', fontFamily: 'monospace', resize: 'vertical', fontSize: '11px' }} />
-            </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {newMacro.type === 'menuCommand' && (
-                <div style={{ position: 'relative' }} ref={commandListRef}>
-                  <input
-                    type="text"
-                    placeholder="Search After Effects commands..."
-                    value={commandSearch || newMacro.menuCommandName || ''}
-                    onFocus={() => setShowCommandList(true)}
-                    onChange={(e) => {
-                      setCommandSearch(e.target.value);
-                      setShowCommandList(true);
-                      updateMacro({ menuCommandName: e.target.value }); // temporarily update to show in search
-                    }}
-                    style={{ width: '100%', padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', fontSize: '12px' }}
-                  />
-                  {showCommandList && (
-                    <div style={{
-                      position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100,
-                      backgroundColor: 'var(--panel-bg-elev)', border: '1px solid var(--panel-border)',
-                      borderRadius: 'var(--radius-md)', maxHeight: '200px', overflowY: 'auto',
-                      marginTop: '4px', boxShadow: '0 8px 16px rgba(0,0,0,0.3)'
-                    }} className="no-scrollbar">
-                      {Object.entries(COMMAND_IDS)
-                        .filter(([_, name]) => name.toLowerCase().includes((commandSearch || '').toLowerCase()))
-                        .slice(0, 50)
-                        .map(([id, name]) => (
-                          <div
-                            key={id}
-                            onClick={() => {
-                              updateMacro({ payload: id, menuCommandName: name, label: newMacro.label || name });
-                              setCommandSearch(name);
-                              setShowCommandList(false);
-                            }}
-                            style={{ padding: '6px 10px', cursor: 'pointer', fontSize: '11px', borderBottom: '1px solid var(--panel-border)' }}
-                            onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--panel-bg-sunken)'}
-                            onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                          >
-                            <span style={{ fontWeight: 'bold' }}>{name}</span>
-                            <span style={{ float: 'right', color: 'var(--panel-fg-dim)' }}>ID: {id}</span>
-                          </div>
-                        ))}
-                    </div>
-                  )}
+
+        {dialogMode === 'macro' && (
+          <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <h4 style={{ margin: 0, fontSize: '14px', color: 'var(--panel-fg)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '8px' }}>{originalMacro.current ? 'Edit Tool' : 'Create New Tool'}</h4>
+            <input type="text" placeholder="Button Label" value={newMacro.label} onChange={(e) => updateMacro({ label: e.target.value })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }} />
+            <select value={newMacro.type} onChange={(e) => updateMacro({ type: e.target.value as MacroType, payload: '' })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }}>
+              <option value="menuCommand">Menu Command (ID)</option>
+              <option value="expression">Expression Code</option>
+              <option value="script">Run Script (.jsx)</option>
+              <option value="ffx">Effect Preset (.ffx)</option>
+              <option value="sequence">Sequence (Chain)</option>
+            </select>
+            {newMacro.type === 'expression' ? (
+              <textarea rows={5} placeholder="Expression..." value={newMacro.payload} onChange={(e) => updateMacro({ payload: e.target.value })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', fontFamily: 'monospace', resize: 'vertical' }} />
+            ) : newMacro.type === 'sequence' ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <span style={{ fontSize: '11px', color: 'var(--panel-fg-muted)' }}>
+                  <strong>JSON Chain:</strong> {"{ \"steps\": [ { \"type\": \"...\", \"payload\": \"...\" } ], \"delayMs\": 50 }"}
+                </span>
+                <textarea rows={4} placeholder='{"steps":[{"type":"menuCommand","payload":"2767","menuCommandName":"Separate Dimensions"},{"type":"expression","payload":"wiggle(5, 50)"}],"delayMs":100}' value={newMacro.payload} onChange={(e) => updateMacro({ payload: e.target.value })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', fontFamily: 'monospace', resize: 'vertical', fontSize: '11px' }} />
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                {newMacro.type === 'menuCommand' && (
+                  <div style={{ position: 'relative' }} ref={commandListRef}>
+                    <input
+                      type="text"
+                      placeholder="Search After Effects commands..."
+                      value={commandSearch || newMacro.menuCommandName || ''}
+                      onFocus={() => setShowCommandList(true)}
+                      onChange={(e) => {
+                        setCommandSearch(e.target.value);
+                        setShowCommandList(true);
+                        updateMacro({ menuCommandName: e.target.value }); // temporarily update to show in search
+                      }}
+                      style={{ width: '100%', padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', fontSize: '12px' }}
+                    />
+                    {showCommandList && (
+                      <div style={{
+                        position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 100,
+                        backgroundColor: 'var(--panel-bg-elev)', border: '1px solid var(--panel-border)',
+                        borderRadius: 'var(--radius-md)', maxHeight: '200px', overflowY: 'auto',
+                        marginTop: '4px', boxShadow: '0 8px 16px rgba(0,0,0,0.3)'
+                      }} className="no-scrollbar">
+                        {Object.entries(COMMAND_IDS)
+                          .filter(([_, name]) => name.toLowerCase().includes((commandSearch || '').toLowerCase()))
+                          .slice(0, 50)
+                          .map(([id, name]) => (
+                            <div
+                              key={id}
+                              onClick={() => {
+                                updateMacro({ payload: id, menuCommandName: name, label: newMacro.label || name });
+                                setCommandSearch(name);
+                                setShowCommandList(false);
+                              }}
+                              style={{ padding: '6px 10px', cursor: 'pointer', fontSize: '11px', borderBottom: '1px solid var(--panel-border)' }}
+                              onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--panel-bg-sunken)'}
+                              onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                            >
+                              <span style={{ fontWeight: 'bold' }}>{name}</span>
+                              <span style={{ float: 'right', color: 'var(--panel-fg-dim)' }}>ID: {id}</span>
+                            </div>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', gap: '5px' }}>
+                  <input type="text" placeholder={newMacro.type === 'ffx' ? 'Path to .ffx preset' : 'ID / Payload'} value={newMacro.payload} onChange={(e) => updateMacro({ payload: e.target.value })} style={{ flex: 1, padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }} />
+                  {newMacro.type === 'script' && <button onClick={handleBrowseScript} style={{ padding: '0 10px', backgroundColor: 'var(--panel-border)', color: 'var(--panel-fg)', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Browse</button>}
+                  {newMacro.type === 'ffx' && <button onClick={() => {
+                    if (typeof window.cep === 'undefined') return toast.error("Only works in AE.");
+                    const result = window.cep.fs.showOpenDialog(false, false, "Select FFX Preset", "", ["ffx"]);
+                    if (result.err === 0 && result.data.length > 0) {
+                      updateMacro({ payload: relativizePath(result.data[0].replace(/\\/g, "/")) });
+                    }
+                  }} style={{ padding: '0 10px', backgroundColor: 'var(--panel-border)', color: 'var(--panel-fg)', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Browse</button>}
                 </div>
-              )}
-              
-              <div style={{ display: 'flex', gap: '5px' }}>
-                <input type="text" placeholder={newMacro.type === 'ffx' ? 'Path to .ffx preset' : 'ID / Payload'} value={newMacro.payload} onChange={(e) => updateMacro({ payload: e.target.value })} style={{ flex: 1, padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }} />
-                {newMacro.type === 'script' && <button onClick={handleBrowseScript} style={{ padding: '0 10px', backgroundColor: 'var(--panel-border)', color: 'var(--panel-fg)', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Browse</button>}
-                {newMacro.type === 'ffx' && <button onClick={() => {
-                  if (typeof window.cep === 'undefined') return toast.error("Only works in AE.");
-                  const result = window.cep.fs.showOpenDialog(false, false, "Select FFX Preset", "", ["ffx"]);
-                  if (result.err === 0 && result.data.length > 0) {
-                    updateMacro({ payload: relativizePath(result.data[0].replace(/\\/g, "/")) });
+              </div>
+            )}
+
+            {/* Hotkey */}
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              <label style={{ color: 'var(--panel-fg-muted)', fontSize: '11px', flexShrink: 0 }}>Hotkey</label>
+              <input
+                type="text"
+                placeholder="e.g. Alt+S (click and press)"
+                value={newMacro.hotkey ?? ''}
+                readOnly
+                onKeyDown={(e) => {
+                  e.preventDefault();
+                  // Esc / Backspace clear the field. Use e.code so the clear
+                  // shortcut is layout-independent (e.key for Backspace can be
+                  // remapped on some keyboards).
+                  if (e.code === 'Escape' || e.code === 'Backspace') {
+                    updateMacro({ hotkey: '' });
+                    return;
                   }
-                }} style={{ padding: '0 10px', backgroundColor: 'var(--panel-border)', color: 'var(--panel-fg)', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Browse</button>}
+                  const combo = formatHotkey(e);
+                  if (!combo) return; // pure modifier press — wait for the real key
+                  updateMacro({ hotkey: combo });
+                }}
+                style={{ flex: 1, padding: '6px 8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', fontSize: '12px', cursor: 'pointer' }}
+              />
+            </div>
+            {hotkeyCollisions.length > 0 && (
+              <div style={{ fontSize: '11px', color: 'var(--warning)', backgroundColor: 'rgba(251,191,36,0.08)', border: '1px solid var(--warning)', borderRadius: 'var(--radius-sm)', padding: '6px 8px' }}>
+                ⚠ Hotkey already used by: {hotkeyCollisions.map((c) => `“${c.label}” (${c.profile})`).join(', ')}. First match wins.
+              </div>
+            )}
+
+            {/* Tags — used by the Command Palette fuzzy search */}
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'flex-start' }}>
+              <label style={{ color: 'var(--panel-fg-muted)', fontSize: '11px', flexShrink: 0, paddingTop: '6px' }}>Tags</label>
+              <TagsInput
+                value={newMacro.tags ?? []}
+                onChange={(tags) => updateMacro({ tags })}
+              />
+            </div>
+
+            <IconPicker value={newMacro.icon ?? ''} onChange={(icon) => updateMacro({ icon })} />
+
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+              <label style={{ color: 'var(--panel-fg-muted)', fontSize: '11px', flexShrink: 0 }}>Color</label>
+              <input type="color" value={newMacro.color} onChange={(e) => updateMacro({ color: e.target.value })} style={{ flex: 1, padding: '0', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', height: '28px', cursor: 'pointer', backgroundColor: 'transparent' }} />
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+              <button onClick={handleCancelMacro} style={{ flex: 1, padding: '10px', backgroundColor: 'var(--panel-border)', color: 'var(--panel-fg)', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer', fontWeight: 'bold' }}>Cancel</button>
+              <button onClick={handleApplyMacro} style={{ flex: 1, padding: '10px', backgroundColor: 'var(--success)', color: '#fff', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer', fontWeight: 'bold' }}>Apply</button>
+            </div>
+          </div>
+        )}
+
+        {dialogMode === 'settings' && (
+          <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '15px', fontSize: '12px' }}>
+            <h4 style={{ margin: 0, fontSize: '14px', color: 'var(--panel-fg)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '8px' }}>Settings</h4>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label>Auto-Context Switching</label>
+              <input type="checkbox" checked={appData.settings.enableContext} onChange={(e) => updateSetting('enableContext', e.target.checked)} />
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              <label>Button Size ({appData.settings.buttonSize}px)</label>
+              <input type="range" min="40" max="200" value={appData.settings.buttonSize} onChange={(e) => updateSetting('buttonSize', parseInt(e.target.value))} />
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              <label>Bezier Button Size ({appData.settings.bezierButtonSize ?? 40}px)</label>
+              <input type="range" min="10" max="200" value={appData.settings.bezierButtonSize ?? 40} onChange={(e) => updateSetting('bezierButtonSize', parseInt(e.target.value))} />
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              <label>Grid Spacing ({appData.settings.spacing}px)</label>
+              <input type="range" min="0" max="24" value={appData.settings.spacing} onChange={(e) => updateSetting('spacing', parseInt(e.target.value))} />
+            </div>
+
+            <hr style={{ borderColor: 'var(--panel-border)', width: '100%', margin: '5px 0' }} />
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label>Command Palette (Ctrl+Space)</label>
+              <input type="checkbox" checked={appData.settings.enableCommandPalette ?? false} onChange={(e) => updateSetting('enableCommandPalette', e.target.checked)} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label>Easing Click-to-Apply</label>
+              <input type="checkbox" checked={appData.settings.easingClickToApply ?? false} onChange={(e) => updateSetting('easingClickToApply', e.target.checked)} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label>Live Curve Preview</label>
+              <input type="checkbox" checked={appData.settings.showCurvePreview ?? false} onChange={(e) => updateSetting('showCurvePreview', e.target.checked)} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label>Lock Macros Panel</label>
+              <input type="checkbox" checked={appData.settings.lockMacros ?? false} onChange={(e) => updateSetting('lockMacros', e.target.checked)} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+              <label>Undo History Size</label>
+              <input type="number" min={1} max={100} value={appData.settings.undoHistorySize ?? 10} onChange={(e) => updateSetting('undoHistorySize', Math.max(1, Math.min(100, parseInt(e.target.value) || 10)))} style={{ width: '60px', padding: '4px 6px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)' }} />
+            </div>
+
+            {/* PROFILES SECTION */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label style={{ color: 'var(--panel-fg)', fontSize: '13px', fontWeight: 600 }}>Profiles</label>
+              <button onClick={handleAddProfile} style={{ padding: '3px 8px', fontSize: '11px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer' }}>+ Add</button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {appData.profiles.map((p, idx) => {
+                const ctxClash = appData.profiles.some((q) => q.id !== p.id && q.autoTriggerContext === p.autoTriggerContext && p.autoTriggerContext !== 'none');
+                return (
+                  <div key={p.id} style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }}>
+                    <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                      <input
+                        type="text"
+                        value={p.name}
+                        onChange={(e) => handleRenameProfile(p.id, e.target.value)}
+                        style={{ flex: 1, minWidth: 0, padding: '4px 6px', backgroundColor: 'var(--panel-bg)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', fontSize: '12px' }}
+                      />
+                      <button onClick={() => handleMoveProfile(p.id, -1)} disabled={idx === 0} title="Move up"
+                        style={{ padding: '2px 6px', backgroundColor: 'transparent', color: idx === 0 ? 'var(--panel-fg-dim)' : 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: idx === 0 ? 'default' : 'pointer', fontSize: '11px' }}>↑</button>
+                      <button onClick={() => handleMoveProfile(p.id, 1)} disabled={idx === appData.profiles.length - 1} title="Move down"
+                        style={{ padding: '2px 6px', backgroundColor: 'transparent', color: idx === appData.profiles.length - 1 ? 'var(--panel-fg-dim)' : 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: idx === appData.profiles.length - 1 ? 'default' : 'pointer', fontSize: '11px' }}>↓</button>
+                    </div>
+                    <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                      <select
+                        value={p.autoTriggerContext}
+                        onChange={(e) => handleSetProfileContext(p.id, e.target.value as ProfileContext)}
+                        title={ctxClash ? 'Another profile already uses this context — first match wins.' : 'Auto-trigger when this layer type is selected'}
+                        style={{ flex: 1, minWidth: 0, padding: '4px 6px', backgroundColor: 'var(--panel-bg)', color: ctxClash ? 'var(--warning)' : 'var(--panel-fg)', border: `1px solid ${ctxClash ? 'var(--warning)' : 'var(--panel-border)'}`, borderRadius: 'var(--radius-sm)', fontSize: '11px' }}
+                      >
+                        {CONTEXT_VALUES.map((c) => (
+                          <option key={c} value={c} style={{ backgroundColor: 'var(--panel-bg-elev)', color: 'var(--panel-fg)' }}>{CONTEXT_LABELS[c]}</option>
+                        ))}
+                      </select>
+                      <span style={{ fontSize: '10px', color: 'var(--panel-fg-dim)', minWidth: '28px', textAlign: 'right' }}>{p.macros.length} ⚡</span>
+                      <button onClick={() => handleDuplicateProfile(p.id)} title="Duplicate"
+                        style={{ padding: '2px 6px', backgroundColor: 'transparent', color: 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: '11px' }}>⎘</button>
+                      <button onClick={() => handleDeleteProfile(p.id)} title="Delete" disabled={appData.profiles.length <= 1}
+                        style={{ padding: '2px 6px', backgroundColor: 'transparent', color: appData.profiles.length <= 1 ? 'var(--panel-fg-dim)' : 'var(--danger)', border: `1px solid ${appData.profiles.length <= 1 ? 'var(--panel-border)' : 'var(--danger)'}`, borderRadius: 'var(--radius-sm)', cursor: appData.profiles.length <= 1 ? 'default' : 'pointer', fontSize: '11px' }}>×</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* EASING PROFILES SECTION */}
+            <hr style={{ borderColor: 'var(--panel-border)', width: '100%', margin: '5px 0' }} />
+            <div ref={easingProfilesSectionRef} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label style={{ color: 'var(--panel-fg)', fontSize: '13px', fontWeight: 600 }}>Easing Profiles</label>
+              <button onClick={handleAddEasingProfile} style={{ padding: '3px 8px', fontSize: '11px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer' }}>+ Add</button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+              {easingProfiles.map((p, idx) => {
+                const isActive = appData.settings.activeEasingProfileId === p.id;
+                return (
+                  <div key={p.id} style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', border: `1px solid ${isActive ? 'var(--accent)' : 'var(--panel-border)'}`, borderRadius: 'var(--radius-md)' }}>
+                    <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                      <input
+                        type="text"
+                        value={p.name}
+                        onChange={(e) => handleRenameEasingProfile(p.id, e.target.value)}
+                        style={{ flex: 1, minWidth: 0, padding: '4px 6px', backgroundColor: 'var(--panel-bg)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', fontSize: '12px' }}
+                      />
+                      <button onClick={() => handleMoveEasingProfile(p.id, -1)} disabled={idx === 0} title="Move up"
+                        style={{ padding: '2px 6px', backgroundColor: 'transparent', color: idx === 0 ? 'var(--panel-fg-dim)' : 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: idx === 0 ? 'default' : 'pointer', fontSize: '11px' }}>↑</button>
+                      <button onClick={() => handleMoveEasingProfile(p.id, 1)} disabled={idx === easingProfiles.length - 1} title="Move down"
+                        style={{ padding: '2px 6px', backgroundColor: 'transparent', color: idx === easingProfiles.length - 1 ? 'var(--panel-fg-dim)' : 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: idx === easingProfiles.length - 1 ? 'default' : 'pointer', fontSize: '11px' }}>↓</button>
+                    </div>
+                    <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                      <button
+                        onClick={() => handleSetActiveEasingProfile(p.id)}
+                        disabled={isActive}
+                        title={isActive ? 'Currently active' : 'Set as active'}
+                        style={{ flex: 1, padding: '4px 6px', backgroundColor: isActive ? 'var(--accent)' : 'var(--panel-bg)', color: isActive ? '#fff' : 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', fontSize: 11, cursor: isActive ? 'default' : 'pointer' }}
+                      >{isActive ? '● Active' : 'Make active'}</button>
+                      <span style={{ fontSize: '10px', color: 'var(--panel-fg-dim)', minWidth: '28px', textAlign: 'right' }}>{p.eases.length} ⌒</span>
+                      <button onClick={() => handleDuplicateEasingProfile(p.id)} title="Duplicate"
+                        style={{ padding: '2px 6px', backgroundColor: 'transparent', color: 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: '11px' }}>⎘</button>
+                      <button onClick={() => handleDeleteEasingProfile(p.id)} title="Delete" disabled={easingProfiles.length <= 1}
+                        style={{ padding: '2px 6px', backgroundColor: 'transparent', color: easingProfiles.length <= 1 ? 'var(--panel-fg-dim)' : 'var(--danger)', border: `1px solid ${easingProfiles.length <= 1 ? 'var(--panel-border)' : 'var(--danger)'}`, borderRadius: 'var(--radius-sm)', cursor: easingProfiles.length <= 1 ? 'default' : 'pointer', fontSize: '11px' }}>×</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <hr style={{ borderColor: 'var(--panel-border)', width: '100%', margin: '5px 0' }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <label style={{ color: 'var(--panel-fg)', fontSize: '13px', fontWeight: 600 }}>Macros</label>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <button onClick={handleExportMacros} style={{ flex: 1, padding: '8px', backgroundColor: 'var(--accent)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Export</button>
+                <button onClick={handleImportMacros} style={{ flex: 1, padding: '8px', backgroundColor: 'var(--success)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Import</button>
+              </div>
+
+              <label style={{ color: 'var(--panel-fg)', fontSize: '13px', fontWeight: 600, marginTop: '6px' }}>Easing Presets</label>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <button onClick={handleExportEasing} title="Export the active easing profile" style={{ flex: 1, padding: '8px', backgroundColor: 'var(--accent)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Export active</button>
+                <button onClick={handleExportAllEasingProfiles} title="Export all easing profiles into one file" style={{ flex: 1, padding: '8px', backgroundColor: 'var(--panel-bg-elev)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Export all</button>
+                <button onClick={handleImportEasing} title="Import a Flow library or Motion Toolbar easing pack" style={{ flex: 1, padding: '8px', backgroundColor: 'var(--success)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Import</button>
               </div>
             </div>
-          )}
+          </div>
+        )}
 
-          {/* Hotkey */}
-          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-            <label style={{ color: 'var(--panel-fg-muted)', fontSize: '11px', flexShrink: 0 }}>Hotkey</label>
-            <input
-              type="text"
-              placeholder="e.g. Alt+S (click and press)"
-              value={newMacro.hotkey ?? ''}
-              readOnly
-              onKeyDown={(e) => {
-                e.preventDefault();
-                // Esc / Backspace clear the field. Use e.code so the clear
-                // shortcut is layout-independent (e.key for Backspace can be
-                // remapped on some keyboards).
-                if (e.code === 'Escape' || e.code === 'Backspace') {
-                  updateMacro({ hotkey: '' });
-                  return;
-                }
-                const combo = formatHotkey(e);
-                if (!combo) return; // pure modifier press — wait for the real key
-                updateMacro({ hotkey: combo });
-              }}
-              style={{ flex: 1, padding: '6px 8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', fontSize: '12px', cursor: 'pointer' }}
-            />
+        {dialogMode === null && (
+          <div style={{ padding: '40px', textAlign: 'center', color: 'var(--panel-fg-muted)' }}>
+            Waiting for data...
           </div>
-          {hotkeyCollisions.length > 0 && (
-            <div style={{ fontSize: '11px', color: 'var(--warning)', backgroundColor: 'rgba(251,191,36,0.08)', border: '1px solid var(--warning)', borderRadius: 'var(--radius-sm)', padding: '6px 8px' }}>
-              ⚠ Hotkey already used by: {hotkeyCollisions.map((c) => `“${c.label}” (${c.profile})`).join(', ')}. First match wins.
-            </div>
-          )}
+        )}
 
-          {/* Tags — used by the Command Palette fuzzy search */}
-          <div style={{ display: 'flex', gap: '6px', alignItems: 'flex-start' }}>
-            <label style={{ color: 'var(--panel-fg-muted)', fontSize: '11px', flexShrink: 0, paddingTop: '6px' }}>Tags</label>
-            <TagsInput
-              value={newMacro.tags ?? []}
-              onChange={(tags) => updateMacro({ tags })}
-            />
-          </div>
-
-          <IconPicker value={newMacro.icon ?? ''} onChange={(icon) => updateMacro({ icon })} />
-
-          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-            <label style={{ color: 'var(--panel-fg-muted)', fontSize: '11px', flexShrink: 0 }}>Color</label>
-            <input type="color" value={newMacro.color} onChange={(e) => updateMacro({ color: e.target.value })} style={{ flex: 1, padding: '0', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', height: '28px', cursor: 'pointer', backgroundColor: 'transparent' }} />
-          </div>
-
-          <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
-            <button onClick={handleCancelMacro} style={{ flex: 1, padding: '10px', backgroundColor: 'var(--panel-border)', color: 'var(--panel-fg)', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer', fontWeight: 'bold' }}>Cancel</button>
-            <button onClick={handleApplyMacro} style={{ flex: 1, padding: '10px', backgroundColor: 'var(--success)', color: '#fff', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer', fontWeight: 'bold' }}>Apply</button>
-          </div>
-        </div>
-      )}
-
-      {dialogMode === 'settings' && (
-        <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '15px', fontSize: '12px' }}>
-          <h4 style={{ margin: 0, fontSize: '14px', color: 'var(--panel-fg)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '8px' }}>Settings</h4>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <label>Auto-Context Switching</label>
-            <input type="checkbox" checked={appData.settings.enableContext} onChange={(e) => updateSetting('enableContext', e.target.checked)} />
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-            <label>Button Size ({appData.settings.buttonSize}px)</label>
-            <input type="range" min="40" max="200" value={appData.settings.buttonSize} onChange={(e) => updateSetting('buttonSize', parseInt(e.target.value))} />
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-            <label>Bezier Button Size ({appData.settings.bezierButtonSize ?? 40}px)</label>
-            <input type="range" min="10" max="200" value={appData.settings.bezierButtonSize ?? 40} onChange={(e) => updateSetting('bezierButtonSize', parseInt(e.target.value))} />
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-            <label>Grid Spacing ({appData.settings.spacing}px)</label>
-            <input type="range" min="0" max="24" value={appData.settings.spacing} onChange={(e) => updateSetting('spacing', parseInt(e.target.value))} />
-          </div>
-
-          <hr style={{ borderColor: 'var(--panel-border)', width: '100%', margin: '5px 0' }} />
-
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <label>Command Palette (Ctrl+Space)</label>
-            <input type="checkbox" checked={appData.settings.enableCommandPalette ?? false} onChange={(e) => updateSetting('enableCommandPalette', e.target.checked)} />
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <label>Easing Click-to-Apply</label>
-            <input type="checkbox" checked={appData.settings.easingClickToApply ?? false} onChange={(e) => updateSetting('easingClickToApply', e.target.checked)} />
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <label>Live Curve Preview</label>
-            <input type="checkbox" checked={appData.settings.showCurvePreview ?? false} onChange={(e) => updateSetting('showCurvePreview', e.target.checked)} />
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <label>Lock Macros Panel</label>
-            <input type="checkbox" checked={appData.settings.lockMacros ?? false} onChange={(e) => updateSetting('lockMacros', e.target.checked)} />
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
-            <label>Undo History Size</label>
-            <input type="number" min={1} max={100} value={appData.settings.undoHistorySize ?? 10} onChange={(e) => updateSetting('undoHistorySize', Math.max(1, Math.min(100, parseInt(e.target.value) || 10)))} style={{ width: '60px', padding: '4px 6px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)' }} />
-          </div>
-
-          {/* PROFILES SECTION */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <label style={{ color: 'var(--panel-fg)', fontSize: '13px', fontWeight: 600 }}>Profiles</label>
-            <button onClick={handleAddProfile} style={{ padding: '3px 8px', fontSize: '11px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer' }}>+ Add</button>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {appData.profiles.map((p, idx) => {
-              const ctxClash = appData.profiles.some((q) => q.id !== p.id && q.autoTriggerContext === p.autoTriggerContext && p.autoTriggerContext !== 'none');
-              return (
-                <div key={p.id} style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }}>
-                  <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                    <input
-                      type="text"
-                      value={p.name}
-                      onChange={(e) => handleRenameProfile(p.id, e.target.value)}
-                      style={{ flex: 1, minWidth: 0, padding: '4px 6px', backgroundColor: 'var(--panel-bg)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', fontSize: '12px' }}
-                    />
-                    <button onClick={() => handleMoveProfile(p.id, -1)} disabled={idx === 0} title="Move up"
-                      style={{ padding: '2px 6px', backgroundColor: 'transparent', color: idx === 0 ? 'var(--panel-fg-dim)' : 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: idx === 0 ? 'default' : 'pointer', fontSize: '11px' }}>↑</button>
-                    <button onClick={() => handleMoveProfile(p.id, 1)} disabled={idx === appData.profiles.length - 1} title="Move down"
-                      style={{ padding: '2px 6px', backgroundColor: 'transparent', color: idx === appData.profiles.length - 1 ? 'var(--panel-fg-dim)' : 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: idx === appData.profiles.length - 1 ? 'default' : 'pointer', fontSize: '11px' }}>↓</button>
-                  </div>
-                  <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                    <select
-                      value={p.autoTriggerContext}
-                      onChange={(e) => handleSetProfileContext(p.id, e.target.value as ProfileContext)}
-                      title={ctxClash ? 'Another profile already uses this context — first match wins.' : 'Auto-trigger when this layer type is selected'}
-                      style={{ flex: 1, minWidth: 0, padding: '4px 6px', backgroundColor: 'var(--panel-bg)', color: ctxClash ? 'var(--warning)' : 'var(--panel-fg)', border: `1px solid ${ctxClash ? 'var(--warning)' : 'var(--panel-border)'}`, borderRadius: 'var(--radius-sm)', fontSize: '11px' }}
-                    >
-                      {CONTEXT_VALUES.map((c) => (
-                        <option key={c} value={c} style={{ backgroundColor: 'var(--panel-bg-elev)', color: 'var(--panel-fg)' }}>{CONTEXT_LABELS[c]}</option>
-                      ))}
-                    </select>
-                    <span style={{ fontSize: '10px', color: 'var(--panel-fg-dim)', minWidth: '28px', textAlign: 'right' }}>{p.macros.length} ⚡</span>
-                    <button onClick={() => handleDuplicateProfile(p.id)} title="Duplicate"
-                      style={{ padding: '2px 6px', backgroundColor: 'transparent', color: 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: '11px' }}>⎘</button>
-                    <button onClick={() => handleDeleteProfile(p.id)} title="Delete" disabled={appData.profiles.length <= 1}
-                      style={{ padding: '2px 6px', backgroundColor: 'transparent', color: appData.profiles.length <= 1 ? 'var(--panel-fg-dim)' : 'var(--danger)', border: `1px solid ${appData.profiles.length <= 1 ? 'var(--panel-border)' : 'var(--danger)'}`, borderRadius: 'var(--radius-sm)', cursor: appData.profiles.length <= 1 ? 'default' : 'pointer', fontSize: '11px' }}>×</button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* EASING PROFILES SECTION */}
-          <hr style={{ borderColor: 'var(--panel-border)', width: '100%', margin: '5px 0' }} />
-          <div ref={easingProfilesSectionRef} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <label style={{ color: 'var(--panel-fg)', fontSize: '13px', fontWeight: 600 }}>Easing Profiles</label>
-            <button onClick={handleAddEasingProfile} style={{ padding: '3px 8px', fontSize: '11px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer' }}>+ Add</button>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            {easingProfiles.map((p, idx) => {
-              const isActive = appData.settings.activeEasingProfileId === p.id;
-              return (
-                <div key={p.id} style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', border: `1px solid ${isActive ? 'var(--accent)' : 'var(--panel-border)'}`, borderRadius: 'var(--radius-md)' }}>
-                  <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                    <input
-                      type="text"
-                      value={p.name}
-                      onChange={(e) => handleRenameEasingProfile(p.id, e.target.value)}
-                      style={{ flex: 1, minWidth: 0, padding: '4px 6px', backgroundColor: 'var(--panel-bg)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', fontSize: '12px' }}
-                    />
-                    <button onClick={() => handleMoveEasingProfile(p.id, -1)} disabled={idx === 0} title="Move up"
-                      style={{ padding: '2px 6px', backgroundColor: 'transparent', color: idx === 0 ? 'var(--panel-fg-dim)' : 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: idx === 0 ? 'default' : 'pointer', fontSize: '11px' }}>↑</button>
-                    <button onClick={() => handleMoveEasingProfile(p.id, 1)} disabled={idx === easingProfiles.length - 1} title="Move down"
-                      style={{ padding: '2px 6px', backgroundColor: 'transparent', color: idx === easingProfiles.length - 1 ? 'var(--panel-fg-dim)' : 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: idx === easingProfiles.length - 1 ? 'default' : 'pointer', fontSize: '11px' }}>↓</button>
-                  </div>
-                  <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-                    <button
-                      onClick={() => handleSetActiveEasingProfile(p.id)}
-                      disabled={isActive}
-                      title={isActive ? 'Currently active' : 'Set as active'}
-                      style={{ flex: 1, padding: '4px 6px', backgroundColor: isActive ? 'var(--accent)' : 'var(--panel-bg)', color: isActive ? '#fff' : 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', fontSize: 11, cursor: isActive ? 'default' : 'pointer' }}
-                    >{isActive ? '● Active' : 'Make active'}</button>
-                    <span style={{ fontSize: '10px', color: 'var(--panel-fg-dim)', minWidth: '28px', textAlign: 'right' }}>{p.eases.length} ⌒</span>
-                    <button onClick={() => handleDuplicateEasingProfile(p.id)} title="Duplicate"
-                      style={{ padding: '2px 6px', backgroundColor: 'transparent', color: 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: '11px' }}>⎘</button>
-                    <button onClick={() => handleDeleteEasingProfile(p.id)} title="Delete" disabled={easingProfiles.length <= 1}
-                      style={{ padding: '2px 6px', backgroundColor: 'transparent', color: easingProfiles.length <= 1 ? 'var(--panel-fg-dim)' : 'var(--danger)', border: `1px solid ${easingProfiles.length <= 1 ? 'var(--panel-border)' : 'var(--danger)'}`, borderRadius: 'var(--radius-sm)', cursor: easingProfiles.length <= 1 ? 'default' : 'pointer', fontSize: '11px' }}>×</button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <hr style={{ borderColor: 'var(--panel-border)', width: '100%', margin: '5px 0' }} />
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            <label style={{ color: 'var(--panel-fg)', fontSize: '13px', fontWeight: 600 }}>Macros</label>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <button onClick={handleExportMacros} style={{ flex: 1, padding: '8px', backgroundColor: 'var(--accent)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Export</button>
-              <button onClick={handleImportMacros} style={{ flex: 1, padding: '8px', backgroundColor: 'var(--success)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Import</button>
-            </div>
-
-            <label style={{ color: 'var(--panel-fg)', fontSize: '13px', fontWeight: 600, marginTop: '6px' }}>Easing Presets</label>
-            <div style={{ display: 'flex', gap: '6px' }}>
-              <button onClick={handleExportEasing} title="Export the active easing profile" style={{ flex: 1, padding: '8px', backgroundColor: 'var(--accent)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Export active</button>
-              <button onClick={handleExportAllEasingProfiles} title="Export all easing profiles into one file" style={{ flex: 1, padding: '8px', backgroundColor: 'var(--panel-bg-elev)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Export all</button>
-              <button onClick={handleImportEasing} title="Import a Flow library or Motion Toolbar easing pack" style={{ flex: 1, padding: '8px', backgroundColor: 'var(--success)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Import</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {dialogMode === null && (
-        <div style={{ padding: '40px', textAlign: 'center', color: 'var(--panel-fg-muted)' }}>
-          Waiting for data...
-        </div>
-      )}
-      
-      <Toaster />
+        <Toaster />
       </div>
 
       <ConfirmDialog

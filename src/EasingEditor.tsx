@@ -789,8 +789,11 @@ export default function EasingEditor() {
           </div>
 
           {/* PROFILE + FILTER ROW — one row, wraps when narrow. The chip
-              counts replace the explicit "(11)" suffix in the dropdown. */}
-          {appData && (appData.settings.easingProfiles?.length ?? 0) > 0 && (
+              counts replace the explicit "(11)" suffix in the dropdown.
+              Always render once appData is loaded; getActiveEasingProfile()
+              returns a synthetic Default profile if the array is somehow
+              missing, so the dropdown + ⚙ never disappear. */}
+          {appData && (
             <div style={{ flexShrink: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px' }}>
               <select
                 value={getActiveEasingProfile(appData).id}
@@ -806,7 +809,7 @@ export default function EasingEditor() {
                   fontSize: 11,
                 }}
               >
-                {appData.settings.easingProfiles!.map((p) => (
+                {(appData.settings.easingProfiles ?? [getActiveEasingProfile(appData)]).map((p) => (
                   <option key={p.id} value={p.id} style={{ backgroundColor: 'var(--panel-bg-elev)' }}>
                     {p.name}
                   </option>

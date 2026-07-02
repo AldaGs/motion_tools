@@ -1,11 +1,12 @@
 // src/App.tsx
 import React, { useState, useEffect, useRef } from 'react';
 import { evalScript } from './utils/adobe';
-import { loadConfig, saveConfig, setDialogPayload, resolvePath } from './utils/storage';
+import { loadConfig, saveConfig, setDialogPayload, resolvePath, getLastLoadDiagnostics } from './utils/storage';
 import { subscribeConfigChanges } from './utils/configWatcher';
 import type { AppData, Macro, Profile } from './types';
 import EasingEditor from './EasingEditor';
 import DialogApp from './DialogApp';
+import MotionColor from './MotionColor';
 import CommandPalette from './components/CommandPalette';
 import ContextMenu, { type ContextMenuItem } from './components/ContextMenu';
 import Toaster from './components/Toaster';
@@ -68,11 +69,12 @@ function App() {
   // Exact match against the IDs registered in CSXS/manifest.xml — a loose
   // substring would mis-route any future panel whose ID contained the words
   // "easing" or "dialog".
-  const view: 'macros' | 'easing' | 'dialog' = (() => {
+  const view: 'macros' | 'easing' | 'dialog' | 'color' = (() => {
     if (typeof window.__adobe_cep__ !== 'undefined') {
       const extId = window.__adobe_cep__.getExtensionId();
       if (extId === 'com.motiontoolbar.panel.easing') return 'easing';
       if (extId === 'com.motiontoolbar.panel.dialog') return 'dialog';
+      if (extId === 'com.motiontoolbar.panel.color') return 'color';
     }
     return 'macros';
   })();
@@ -105,6 +107,25 @@ function App() {
     setAppData(data);
     if (data.settings.lastOverrideProfileId) {
       setOverrideProfileId(data.settings.lastOverrideProfileId);
+    }
+
+    // Surface load problems once on startup so a corrupt config doesn't
+    // silently revert the user to defaults. Shown only on the macros view
+    // (the easing view would double-toast the same info).
+    if (view === 'macros') {
+      const diag = getLastLoadDiagnostics();
+      if (diag.errors.length > 0) {
+        toast.error(`Couldn't fully load config — ${diag.errors[0]}. Default values shown for the unreadable parts. Backup saved next to the file.`);
+      } else if (
+        diag.droppedMacros + diag.droppedProfiles + diag.droppedEases + diag.droppedEasingProfiles > 0
+      ) {
+        const parts: string[] = [];
+        if (diag.droppedMacros) parts.push(`${diag.droppedMacros} macro${diag.droppedMacros === 1 ? '' : 's'}`);
+        if (diag.droppedProfiles) parts.push(`${diag.droppedProfiles} profile${diag.droppedProfiles === 1 ? '' : 's'}`);
+        if (diag.droppedEases) parts.push(`${diag.droppedEases} ease${diag.droppedEases === 1 ? '' : 's'}`);
+        if (diag.droppedEasingProfiles) parts.push(`${diag.droppedEasingProfiles} easing profile${diag.droppedEasingProfiles === 1 ? '' : 's'}`);
+        toast.info(`Skipped ${parts.join(', ')} with missing required fields.`);
+      }
     }
 
     return subscribeConfigChanges(() => setAppData(loadConfig()));
@@ -417,6 +438,15 @@ function App() {
 
   if (view === 'dialog') {
     return <DialogApp />;
+  }
+
+  if (view === 'color') {
+    return (
+      <>
+        <MotionColor />
+        <Toaster />
+      </>
+    );
   }
 
   return (
