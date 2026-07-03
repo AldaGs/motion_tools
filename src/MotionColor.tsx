@@ -38,6 +38,14 @@ export default function MotionColor() {
     setSettings((prev) => { const next = { ...prev, [key]: value }; saveColorSettings(next); return next; });
   };
 
+  // Suppress CEF's built-in right-click menu (Back / Forward / Print / View
+  // source) across the whole panel — our swatches provide their own menus.
+  useEffect(() => {
+    const block = (e: MouseEvent) => e.preventDefault();
+    window.addEventListener('contextmenu', block);
+    return () => window.removeEventListener('contextmenu', block);
+  }, []);
+
   // Detect an embedded project palette when the panel opens, and re-check each
   // time the settings menu is opened (the active project may have changed).
   useEffect(() => { if (showSettings) projectPaletteExists().then(setProjectHas); }, [showSettings]);
