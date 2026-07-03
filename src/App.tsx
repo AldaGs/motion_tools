@@ -76,6 +76,11 @@ function App() {
       const extId = window.__adobe_cep__.getExtensionId();
       if (extId === 'com.motiontoolbar.panel.easing') return 'easing';
       if (extId === 'com.motiontoolbar.panel.dialog') return 'dialog';
+      // The dedicated (nameless) settings panels reuse DialogApp, which scopes
+      // itself to toolbar-only or easing-only settings based on its own
+      // extension id.
+      if (extId === 'com.motiontoolbar.panel.toolbarsettings') return 'dialog';
+      if (extId === 'com.motiontoolbar.panel.easingsettings') return 'dialog';
       if (extId === 'com.motiontoolbar.panel.color') return 'color';
       if (extId === 'com.motiontoolbar.panel.gifs') return 'gifs';
       if (extId === 'com.motiontoolbar.panel.gifsettings') return 'gifsettings';
@@ -104,6 +109,19 @@ function App() {
 
   const openCreateMacro = () => openDialog('macro');
   const openEditMacro = (macro: Macro) => openDialog('macro', macro);
+
+  // Each toolbar has its own dedicated (nameless) settings panel now, so
+  // settings no longer share the Tool Editor's `dialog` extension.
+  const openSettings = (scope: 'toolbar' | 'easing') => {
+    if (typeof window.__adobe_cep__ !== 'undefined') {
+      const ext = scope === 'easing'
+        ? 'com.motiontoolbar.panel.easingsettings'
+        : 'com.motiontoolbar.panel.toolbarsettings';
+      window.__adobe_cep__.requestOpenExtension(ext, '');
+    } else {
+      toast.error("Settings only works in the CEP environment.");
+    }
+  };
 
   useEffect(() => {
     // Initial load
@@ -235,10 +253,13 @@ function App() {
       }
       // Command Palette toggle — gated to the macros view, otherwise the
       // shortcut would silently flip state in panels that don't render it.
-      if (view === 'macros' && appData?.settings?.enableCommandPalette && e.ctrlKey && e.code === 'Space') {
-        e.preventDefault();
-        setShowCommandPalette((prev) => !prev);
-        return;
+      if (view === 'macros' && appData?.settings?.enableCommandPalette) {
+        const paletteCombo = appData.settings.commandPaletteHotkey || 'Ctrl+Space';
+        if (formatHotkey(e) === paletteCombo) {
+          e.preventDefault();
+          setShowCommandPalette((prev) => !prev);
+          return;
+        }
       }
       // Macro hotkeys — only when not in edit mode and no dialog/palette open
       if (isEditMode || showCommandPalette) return;
@@ -515,7 +536,7 @@ function App() {
                 <button onClick={handleToggleEdit} title={appData.settings.lockMacros ? 'Locked — toggle in Settings' : (isEditMode ? 'Exit edit mode' : 'Edit')} style={{ padding: '4px 8px', fontSize: '11px', cursor: appData.settings.lockMacros ? 'not-allowed' : 'pointer', backgroundColor: isEditMode ? 'var(--danger)' : 'var(--panel-bg-elev)', color: appData.settings.lockMacros ? 'var(--panel-fg-dim)' : 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', opacity: appData.settings.lockMacros ? 0.6 : 1 }}>
                   {appData.settings.lockMacros ? '🔒' : (isEditMode ? 'Done' : 'Edit')}
                 </button>
-                <button onClick={() => openDialog('settings')} style={{ padding: '4px 8px', fontSize: '11px', cursor: 'pointer', backgroundColor: 'var(--panel-bg-elev)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)' }}>
+                <button onClick={() => openSettings('toolbar')} style={{ padding: '4px 8px', fontSize: '11px', cursor: 'pointer', backgroundColor: 'var(--panel-bg-elev)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)' }}>
                 ⚙️
                 </button>
               </div>
@@ -652,8 +673,11 @@ function App() {
       )}
 
       {contextMenu && (() => {
+        // Route the "Open settings…" item to whichever dedicated settings
+        // panel matches the current view.
+        const settingsScope: 'toolbar' | 'easing' = view === 'easing' ? 'easing' : 'toolbar';
         const items: ContextMenuItem[] = [
-          { id: 'settings', label: 'Open settings…', icon: '⚙', onSelect: () => openDialog('settings') },
+          { id: 'settings', label: 'Open settings…', icon: '⚙', onSelect: () => openSettings(settingsScope) },
         ];
         if (view === 'macros') {
           items.push(
@@ -663,12 +687,7 @@ function App() {
         } else if (view === 'easing') {
           items.push({
             id: 'easing-profiles', label: 'Manage easing profiles…', icon: '⌒',
-            onSelect: () => {
-              if (typeof window.__adobe_cep__ !== 'undefined') {
-                setDialogPayload({ mode: 'settings', focus: 'easingProfiles' });
-                window.__adobe_cep__.requestOpenExtension('com.motiontoolbar.panel.dialog', '');
-              }
-            },
+            onSelect: () => openSettings('easing'),
           });
         }
         return <ContextMenu x={contextMenu.x} y={contextMenu.y} items={items} onClose={() => setContextMenu(null)} />;

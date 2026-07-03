@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<ExtensionManifest Version="7.0" ExtensionBundleId="com.motiontoolbar.panel" ExtensionBundleVersion="1.0.0" ExtensionBundleName="Motion Toolbar" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<ExtensionManifest Version="7.0" ExtensionBundleId="com.motiontoolbar.panel" ExtensionBundleVersion="1.0.0" ExtensionBundleName="MTAG" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   
   <ExtensionList>
     <Extension Id="com.motiontoolbar.panel.main" Version="1.0.0" />
@@ -9,6 +9,8 @@
     <Extension Id="com.motiontoolbar.panel.gifs" Version="1.0.0" />
     <Extension Id="com.motiontoolbar.panel.gifsettings" Version="1.0.0" />
     <Extension Id="com.motiontoolbar.panel.dialog" Version="1.0.0" />
+    <Extension Id="com.motiontoolbar.panel.toolbarsettings" Version="1.0.0" />
+    <Extension Id="com.motiontoolbar.panel.easingsettings" Version="1.0.0" />
   </ExtensionList>
   
   <ExecutionEnvironment>
@@ -39,7 +41,7 @@
         <Lifecycle><AutoVisible>true</AutoVisible></Lifecycle>
         <UI>
           <Type>Panel</Type>
-          <Menu>Motion Toolbar</Menu>
+          <Menu>MTAG Toolbar</Menu>
           <Geometry>
             <Size><Height>600</Height><Width>300</Width></Size>
             <MinSize><Height>200</Height><Width>40</Width></MinSize>
@@ -61,7 +63,7 @@
         <Lifecycle><AutoVisible>true</AutoVisible></Lifecycle>
         <UI>
           <Type>Panel</Type>
-          <Menu>Motion Secondary</Menu>
+          <Menu>MTAG Secondary</Menu>
           <Geometry>
             <Size><Height>600</Height><Width>300</Width></Size>
             <MinSize><Height>200</Height><Width>40</Width></MinSize>
@@ -83,7 +85,7 @@
         <Lifecycle><AutoVisible>true</AutoVisible></Lifecycle>
         <UI>
           <Type>Panel</Type>
-          <Menu>Motion Easing</Menu>
+          <Menu>MTAG Easing</Menu>
           <Geometry>
             <Size><Height>400</Height><Width>300</Width></Size>
             <MinSize><Height>200</Height><Width>160</Width></MinSize>
@@ -105,7 +107,7 @@
         <Lifecycle><AutoVisible>true</AutoVisible></Lifecycle>
         <UI>
           <Type>Panel</Type>
-          <Menu>Motion Color</Menu>
+          <Menu>MTAG Color</Menu>
           <Geometry>
             <Size><Height>620</Height><Width>320</Width></Size>
             <MinSize><Height>300</Height><Width>260</Width></MinSize>
@@ -128,7 +130,7 @@
         <Lifecycle><AutoVisible>true</AutoVisible></Lifecycle>
         <UI>
           <Type>Panel</Type>
-          <Menu>Motion GIFS</Menu>
+          <Menu>MTAG GIFS</Menu>
           <Geometry>
             <Size><Height>560</Height><Width>320</Width></Size>
             <MinSize><Height>320</Height><Width>260</Width></MinSize>
@@ -151,9 +153,8 @@
         <Lifecycle><AutoVisible>true</AutoVisible></Lifecycle>
         <UI>
           <Type>Modeless</Type>
-          <Menu>Motion GIFS Settings</Menu>
           <Geometry>
-            <Size><Height>520</Height><Width>340</Width></Size>
+            <Size><Height>640</Height><Width>340</Width></Size>
             <MinSize><Height>360</Height><Width>280</Width></MinSize>
           </Geometry>
         </UI>
@@ -176,6 +177,52 @@
           <Geometry>
             <Size><Height>550</Height><Width>350</Width></Size>
             <MinSize><Height>400</Height><Width>300</Width></MinSize>
+          </Geometry>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+
+    <!-- Dedicated (nameless) settings panel for the Motion Toolbar / macros
+         panel. No <Menu> element, so it never appears in AE's Window menu —
+         it's only reachable via the panel's ⚙ button. -->
+    <Extension Id="com.motiontoolbar.panel.toolbarsettings">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./dist/index.html</MainPath>
+          <ScriptPath>./jsx/hostscript.jsx</ScriptPath>
+          <CEFCommandLine>
+            <Parameter>--enable-nodejs</Parameter>
+            <Parameter>--allow-file-access</Parameter>
+          </CEFCommandLine>
+        </Resources>
+        <Lifecycle><AutoVisible>true</AutoVisible></Lifecycle>
+        <UI>
+          <Type>Modeless</Type>
+          <Geometry>
+            <Size><Height>620</Height><Width>340</Width></Size>
+            <MinSize><Height>360</Height><Width>280</Width></MinSize>
+          </Geometry>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+
+    <!-- Dedicated (nameless) settings panel for the Motion Easing panel. -->
+    <Extension Id="com.motiontoolbar.panel.easingsettings">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./dist/index.html</MainPath>
+          <ScriptPath>./jsx/hostscript.jsx</ScriptPath>
+          <CEFCommandLine>
+            <Parameter>--enable-nodejs</Parameter>
+            <Parameter>--allow-file-access</Parameter>
+          </CEFCommandLine>
+        </Resources>
+        <Lifecycle><AutoVisible>true</AutoVisible></Lifecycle>
+        <UI>
+          <Type>Modeless</Type>
+          <Geometry>
+            <Size><Height>560</Height><Width>340</Width></Size>
+            <MinSize><Height>320</Height><Width>280</Width></MinSize>
           </Geometry>
         </UI>
       </DispatchInfo>

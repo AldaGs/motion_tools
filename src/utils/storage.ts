@@ -546,9 +546,9 @@ export const loadPaletteWorkingState = (): { name: string; colors: string[] } | 
 
 // Motion Color panel preferences (exposed via the header ⚙ menu). Kept in its
 // own file so it's independent of the working-palette/wheel state.
-export interface ColorSettings { autoUpdateOpen: boolean }
+export interface ColorSettings { autoUpdateOpen: boolean; autoSyncProject: boolean }
 
-const COLOR_SETTINGS_DEFAULTS: ColorSettings = { autoUpdateOpen: false };
+const COLOR_SETTINGS_DEFAULTS: ColorSettings = { autoUpdateOpen: false, autoSyncProject: false };
 
 export const loadColorSettings = (): ColorSettings => {
   try {
@@ -593,6 +593,7 @@ export interface GifSettings {
   keepFrames: boolean;
   openFolder: boolean;           // reveal the GIF in Explorer/Finder after export
   playAfter: boolean;            // open the GIF in the default player after export
+  renderInBackground: boolean;   // render via aerender so AE stays editable
 }
 
 const GIF_SETTINGS_DEFAULTS: GifSettings = {
@@ -607,6 +608,7 @@ const GIF_SETTINGS_DEFAULTS: GifSettings = {
   keepFrames: false,
   openFolder: false,
   playAfter: true,
+  renderInBackground: false,
 };
 
 export const loadGifSettings = (): GifSettings => {

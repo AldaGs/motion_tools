@@ -790,11 +790,6 @@ function _giphIncrementName(filePath, ext) {
     return fileName;
 }
 
-function _giphSubFolder(parent, name) {
-    var f = Folder(parent.fsName + name);
-    if (!f.exists) f.create();
-    return f;
-}
 
 // Public entry point. optsJSON: { templateIndex, outputFolder, templateFile }
 // Returns JSON: { ok, mode:'png'|'prores', base, folder, name, width, height,
@@ -812,12 +807,12 @@ function giphRenderComp(optsJSON) {
         var mode = (templateName.indexOf("PNG") != -1) ? "png" : "prores";
         var ext = (mode === "png") ? ".png" : ".mov";
 
-        var outFolder = Folder(opts.outputFolder);
-        if (!outFolder.exists) return JSON.stringify({ ok: false, error: "Output folder is invalid." });
-
-        // Render into a dedicated subfolder so intermediate frames are easy to
-        // clean up later (mirrors GIPHER's "GIPHERrender").
-        var renderFolder = _giphSubFolder(outFolder, "\\GIPHERrender");
+        // The panel decides where intermediates live (a throwaway OS temp
+        // folder, or a GIPHERrender subfolder when the user keeps frames) and
+        // owns cleanup — we just render into it.
+        var renderFolder = Folder(opts.renderFolder);
+        if (!renderFolder.exists) renderFolder.create();
+        if (!renderFolder.exists) return JSON.stringify({ ok: false, error: "Could not create render folder." });
 
         var queue = _giphRenderQueue();
         if (!queue) return JSON.stringify({ ok: false, error: "Render queue unavailable." });
@@ -842,6 +837,90 @@ function giphRenderComp(optsJSON) {
         return JSON.stringify({
             ok: true,
             mode: mode,
+            base: base,
+            folder: renderFolder.fsName,
+            name: baseName,
+            width: comp.width,
+            height: comp.height,
+            frameRate: comp.frameRate,
+            duration: comp.duration
+        });
+    } catch (err) {
+        return JSON.stringify({ ok: false, error: err.toString() });
+    }
+}
+
+// Prepare a background (aerender) render: make sure the chosen output-module
+// template is registered so aerender can reference it, save the project to disk
+// (aerender reads the .aep from disk), and return everything Node needs to spawn
+// aerender and then encode. Unlike giphRenderComp this does NOT clear the user's
+// render queue or block — it only registers the template via a throwaway item.
+//
+// optsJSON: { templateIndex, outputFolder, templateFile }
+// Returns JSON: { ok, mode, projectPath, compName, templateName, base, folder,
+//                 name, width, height, frameRate, duration } or { ok:false, error }.
+function giphPrepareBackgroundRender(optsJSON) {
+    try {
+        var opts = JSON.parse(optsJSON);
+        var comp = _giphComp();
+        if (!comp) return JSON.stringify({ ok: false, error: "Open a composition first." });
+
+        var proj = app.project;
+        if (!proj || !proj.file) {
+            return JSON.stringify({ ok: false, error: "Save the project first — background render reads it from disk." });
+        }
+
+        var idx = parseInt(opts.templateIndex);
+        if (isNaN(idx) || idx < 0 || idx >= GIPH_TEMPLATES.length) idx = 0;
+        var templateName = GIPH_TEMPLATES[idx][0];
+        var aepxCompName = GIPH_TEMPLATES[idx][1];
+        var mode = (templateName.indexOf("PNG") != -1) ? "png" : "prores";
+
+        var renderFolder = Folder(opts.renderFolder);
+        if (!renderFolder.exists) renderFolder.create();
+        if (!renderFolder.exists) return JSON.stringify({ ok: false, error: "Could not create render folder." });
+
+        // Registering an output-module template needs a render-queue item, and
+        // adding one yanks the user to the Render Queue panel. Registration
+        // persists in AE prefs, so only do it the first time we see each
+        // template — every subsequent background export touches nothing.
+        var prefKey = "installed_" + templateName;
+        var alreadyInstalled = false;
+        try {
+            alreadyInstalled = app.settings.haveSetting("MotionGIFS", prefKey) &&
+                               app.settings.getSetting("MotionGIFS", prefKey) === "true";
+        } catch (e) {}
+
+        if (!alreadyInstalled) {
+            var queue = _giphRenderQueue();
+            if (!queue) return JSON.stringify({ ok: false, error: "Render queue unavailable." });
+            var probe = queue.items.add(comp);
+            var module = probe.outputModule(1);
+            if (!_giphIsTemplate(module, templateName)) {
+                var ok = _giphEnsureTemplate(opts.templateFile, templateName, aepxCompName);
+                if (!ok) { try { probe.remove(); } catch (e) {} return JSON.stringify({ ok: false, error: "Could not install template: " + templateName }); }
+            }
+            try { probe.remove(); } catch (e) {}
+            try { app.settings.saveSetting("MotionGIFS", prefKey, "true"); } catch (e) {}
+            // We just touched the render queue; bring the comp back to the front
+            // so the user isn't left staring at the Render Queue panel.
+            try { comp.openInViewer(); } catch (e) {}
+        }
+
+        // Flush current edits to disk so aerender renders what the user sees.
+        proj.save();
+
+        var baseName = String(comp.name).replace(/\s/g, "");
+        // aerender writes literally to -output; keep a stable base (no numeric
+        // increment) so the frame glob / .mov path is predictable in Node.
+        var base = renderFolder.fsName + "\\" + baseName;
+
+        return JSON.stringify({
+            ok: true,
+            mode: mode,
+            projectPath: proj.file.fsName,
+            compName: comp.name,
+            templateName: templateName,
             base: base,
             folder: renderFolder.fsName,
             name: baseName,
@@ -898,6 +977,212 @@ function extractColorsFromSelection() {
             for (var n = 0; n < arr.length; n++) parts.push('"' + arr[n] + '"');
             return parts.join(",");
         })() + "]";
+    } catch (e) {
+        return "Error:" + e.toString();
+    }
+}
+
+// ==========================================================================
+// COLOR PALETTE — embed ("incrust") a palette into the current project and
+// sync it back. The palette lives as a comp named "agCP_<projectName>" full of
+// hexagon shape layers (one per color) plus a guide-text layer, so it travels
+// inside the .aep. Ported from AG Color Palette.
+// ==========================================================================
+
+function _colIsWin() { return ($.os.indexOf("Windows") !== -1); }
+
+// Locate the project's palette comp, or null. Returns the comp object.
+function _colIncrustComp() {
+    if (!app.project || !app.project.file) return null;
+    var projName = decodeURI(app.project.file.name).replace(/\.aep$/i, "");
+    var name = "agCP_" + projName;
+    for (var i = 1; i <= app.project.numItems; i++) {
+        var it = app.project.item(i);
+        if (it instanceof CompItem && it.name === name) return it;
+    }
+    return null;
+}
+
+function _colIncrustName() {
+    var projName = decodeURI(app.project.file.name).replace(/\.aep$/i, "");
+    return "agCP_" + projName;
+}
+
+// "true" / "false" — whether this project already carries an embedded palette.
+function projectPaletteExists() {
+    try { return _colIncrustComp() ? "true" : "false"; }
+    catch (e) { return "false"; }
+}
+
+// Read the embedded palette back as a JSON hex array (top-to-bottom order).
+function getProjectPaletteColors() {
+    try {
+        if (!app.project || !app.project.file) return "Warning:Save your project first.";
+        var comp = _colIncrustComp();
+        if (!comp) return "Warning:This project has no embedded palette yet.";
+
+        var colors = [];
+        // Layer 1 is the guide text — start at 2.
+        for (var L = 2; L <= comp.numLayers; L++) {
+            var layer = comp.layer(L);
+            if (layer.matchName !== "ADBE Vector Layer") continue;
+            var fillHex = null;
+            try {
+                var root = layer.property("ADBE Root Vectors Group");
+                if (root && root.numProperties > 0) {
+                    var group = root.property(1);
+                    if (group && group.matchName === "ADBE Vector Group") {
+                        var vectors = group.property("ADBE Vectors Group");
+                        if (vectors) {
+                            for (var p = 1; p <= vectors.numProperties; p++) {
+                                if (vectors.property(p).matchName === "ADBE Vector Graphic - Fill") {
+                                    fillHex = _colRgbToHex(vectors.property(p).property("ADBE Vector Fill Color").value);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e) {}
+            if (fillHex) colors.push(fillHex);
+        }
+        var parts = [];
+        for (var n = 0; n < colors.length; n++) parts.push('"' + colors[n] + '"');
+        return "[" + parts.join(",") + "]";
+    } catch (e) {
+        return "Error:" + e.toString();
+    }
+}
+
+// Set an existing hexagon layer's fill color (used by the in-place fast path).
+function _colSetHexagonFill(layer, hex) {
+    try {
+        var root = layer.property("ADBE Root Vectors Group");
+        var group = root.property(1);
+        var vectors = group.property("ADBE Vectors Group");
+        for (var p = 1; p <= vectors.numProperties; p++) {
+            if (vectors.property(p).matchName === "ADBE Vector Graphic - Fill") {
+                vectors.property(p).property("ADBE Vector Fill Color").setValue(_colHexToRGB(hex));
+                return true;
+            }
+        }
+    } catch (e) {}
+    return false;
+}
+
+function _colCreateHexagon(comp, hexCode, R, cols) {
+    var shapeLayer = comp.layers.addShape();
+    shapeLayer.name = String(hexCode).toUpperCase();
+    var shapeGroup = shapeLayer.property("ADBE Root Vectors Group").addProperty("ADBE Vector Group");
+    var poly = shapeGroup.property("ADBE Vectors Group").addProperty("ADBE Vector Shape - Star");
+    poly.property("ADBE Vector Star Type").setValue(2);
+    poly.property("ADBE Vector Star Points").setValue(6);
+    poly.property("ADBE Vector Star Outer Radius").setValue(R);
+    var fill = shapeGroup.property("ADBE Vectors Group").addProperty("ADBE Vector Graphic - Fill");
+    fill.property("ADBE Vector Fill Color").setValue(_colHexToRGB(hexCode));
+
+    // Auto-arrange expression: honeycomb grid below the guide text.
+    var expr = "var R =" + R + ";\n" +
+               "var W = R * Math.sqrt(3);\n" +
+               "var H = R * 1.5;\n" +
+               "var cols = " + cols + ";\n" +
+               "var startX = R*1.5;\n" +
+               "var guide = thisComp.layer('GUIDE (Do Not Delete)');\n" +
+               "var gRect = guide.sourceRectAtTime(time, false);\n" +
+               "var gScale = guide.scale[1] / 100;\n" +
+               "var guideBottom = guide.position[1] + (gRect.top + gRect.height) * gScale;\n" +
+               "var startY = guideBottom + 100;\n" +
+               "var i = index - 2;\n" +
+               "var row = Math.floor(i / cols);\n" +
+               "var col = i % cols;\n" +
+               "var x = startX + (col * W);\n" +
+               "if (row % 2 !== 0) x += (W / 2);\n" +
+               "var y = startY + (row * H);\n" +
+               "[x, y];";
+    shapeLayer.property("ADBE Transform Group").property("ADBE Position").expression = expr;
+    shapeLayer.moveToEnd();
+}
+
+// Embed / update the palette in the project. `colorsJson` is a JSON hex array;
+// `cols` is the honeycomb column count (default 8). Returns a status string.
+function syncPaletteToProject(colorsJson, cols) {
+    try {
+        if (!app.project.file) {
+            if (!app.project.saveWithDialog()) return "Warning:Save your project first to embed a palette.";
+        }
+        var colors;
+        try { colors = JSON.parse(colorsJson); } catch (e) { colors = eval("(" + colorsJson + ")"); }
+        if (!colors || !colors.length) return "Warning:Palette is empty — nothing to embed.";
+        cols = cols || 8;
+
+        var R = 40;
+        var Hh = R * 1.15;
+        var rows = Math.ceil(colors.length / cols); if (rows < 1) rows = 1;
+        var compWidth = cols * (R * 2);
+        var compHeight = 100 + (rows * Hh) + 80 + (Hh * 4);
+
+        var comp = _colIncrustComp();
+
+        // Fast path: if the comp already exists and the color *count* is
+        // unchanged, just recolor the existing hexagon layers in place. Avoids
+        // the full teardown/rebuild and keeps it to a single undo group.
+        if (comp) {
+            var shapeLayers = [];
+            for (var s = 2; s <= comp.numLayers; s++) {
+                if (comp.layer(s).matchName === "ADBE Vector Layer") shapeLayers.push(comp.layer(s));
+            }
+            if (shapeLayers.length === colors.length) {
+                app.beginUndoGroup("Update Project Palette");
+                try {
+                    for (var u = 0; u < colors.length; u++) {
+                        _colSetHexagonFill(shapeLayers[u], colors[u]);
+                        shapeLayers[u].name = String(colors[u]).toUpperCase();
+                    }
+                } finally {
+                    app.endUndoGroup();
+                }
+                return "Updated " + colors.length + " color" + (colors.length === 1 ? "" : "s") + " in the project.";
+            }
+        }
+
+        app.beginUndoGroup("Sync Palette to Project");
+        try {
+            if (!comp) {
+                comp = app.project.items.addComp(_colIncrustName(), Math.max(1, Math.round(compWidth)), Math.max(1, Math.round(compHeight)), 1, 1, 24);
+            } else {
+                comp.width = Math.max(1, Math.round(compWidth));
+                comp.height = Math.max(1, Math.round(compHeight));
+            }
+            // Clear existing layers (guide is locked).
+            while (comp.numLayers > 0) {
+                var l1 = comp.layer(1);
+                if (l1.locked) l1.locked = false;
+                l1.remove();
+            }
+
+            // Guide text.
+            var guideMsg = "To add a new color, duplicate a layer\r\nand set the new color, or edit it\r\nin the Motion Color panel.";
+            var guideText = comp.layers.addText(guideMsg);
+            guideText.name = "GUIDE (Do Not Delete)";
+            var textProp = guideText.property("Source Text");
+            var doc = textProp.value;
+            doc.font = _colIsWin() ? "SegoeUI" : "HelveticaNeue";
+            doc.fontSize = 20;
+            doc.autoLeading = true;
+            doc.tracking = 0;
+            doc.justification = ParagraphJustification.CENTER_JUSTIFY;
+            try { textProp.setValue(doc); } catch (eFont) { doc.font = ""; try { textProp.setValue(doc); } catch (eFont2) {} }
+            guideText.property("Position").setValue([compWidth / 2, 40]);
+            guideText.property("Scale").expression =
+                "var padding = 40;\nvar maxW = thisComp.width - padding;\nvar currentW = sourceRectAtTime(time, false).width;\nvar s = (maxW / currentW) * 100;\nif (s > 100) s = 100;\n[s, s];";
+            guideText.locked = true;
+
+            for (var c = 0; c < colors.length; c++) _colCreateHexagon(comp, colors[c], R, cols);
+        } finally {
+            app.endUndoGroup();
+        }
+
+        return "Embedded " + colors.length + " color" + (colors.length === 1 ? "" : "s") + " into the project.";
     } catch (e) {
         return "Error:" + e.toString();
     }

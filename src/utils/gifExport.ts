@@ -52,6 +52,23 @@ export interface EncodeOptions {
   keepFrames?: boolean;
 }
 
+/** Result the host script returns from giphPrepareBackgroundRender(). */
+export interface BackgroundRenderPrep {
+  ok: boolean;
+  error?: string;
+  mode: 'png' | 'prores';
+  projectPath: string;
+  compName: string;
+  templateName: string;
+  base: string;   // path without extension; frames are `${base}_[#####].png`, ProRes is `${base}.mov`
+  folder: string;
+  name: string;
+  width: number;
+  height: number;
+  frameRate: number;
+  duration: number;
+}
+
 /** Result the host script returns from giphRenderComp(). */
 export interface RenderResult {
   ok: boolean;
@@ -177,6 +194,75 @@ export const probeVideo = (input: string): Promise<{ width: number; height: numb
   });
 };
 
+// --- background rendering via aerender --------------------------------------
+
+/** Absolute path to aerender, which sits beside the AE host executable. */
+export const aerenderPath = (): string => {
+  const cs = new window.CSInterface();
+  const path = window.require('path');
+  const host = normalizeSystemPath(cs.getSystemPath(window.SystemPath.HOST_APPLICATION));
+  const dir = path.dirname(host);
+  return path.join(dir, platformDir() === 'win' ? 'aerender.exe' : 'aerender');
+};
+
+/** Turn a background-render prep into the RenderResult encodeRenderToGif wants. */
+const prepToRenderResult = (prep: BackgroundRenderPrep): RenderResult => ({
+  ok: true, mode: prep.mode, base: prep.base, folder: prep.folder, name: prep.name,
+  width: prep.width, height: prep.height, frameRate: prep.frameRate, duration: prep.duration,
+});
+
+/**
+ * Spawn aerender to render `prep.compName` from the saved project to the bundled
+ * template, WITHOUT blocking After Effects. Progress is derived from aerender's
+ * per-frame `PROGRESS:` lines against the comp's total frame count. Resolves
+ * with a RenderResult ready to hand to encodeRenderToGif.
+ */
+export const renderInBackground = (
+  prep: BackgroundRenderPrep,
+  onProgress: (frac: number, message: string) => void,
+): Promise<RenderResult> => {
+  const { spawn } = window.require('child_process');
+  const fs = window.require('fs');
+
+  const aerender = aerenderPath();
+  if (!fs.existsSync(aerender)) {
+    return Promise.reject(new Error(`aerender not found at ${aerender}`));
+  }
+
+  // aerender writes literally to -output; a still sequence needs the [#####]
+  // frame token, a movie is a single file.
+  const output = prep.mode === 'png' ? `${prep.base}_[#####].png` : `${prep.base}.mov`;
+  const totalFrames = Math.max(1, Math.round(prep.duration * prep.frameRate));
+
+  return new Promise((resolve, reject) => {
+    let done = 0;
+    let tail = '';
+    const args = [
+      '-project', prep.projectPath,
+      '-comp', prep.compName,
+      '-OMtemplate', prep.templateName,
+      '-output', output,
+    ];
+    const proc = spawn(aerender, args);
+    const scan = (buf: any) => {
+      const text = String(buf);
+      tail = (tail + text).slice(-4000);
+      // One PROGRESS line per rendered frame.
+      const matches = text.match(/PROGRESS:/g);
+      if (matches) {
+        done = Math.min(totalFrames, done + matches.length);
+        onProgress(done / totalFrames, `Rendering… ${Math.round((done / totalFrames) * 100)}%`);
+      }
+    };
+    proc.stdout.on('data', scan);
+    proc.stderr.on('data', scan);
+    proc.on('error', reject);
+    proc.on('close', (code: number) =>
+      code === 0 ? resolve(prepToRenderResult(prep)) : reject(new Error(`aerender exited ${code}\n${tail}`)),
+    );
+  });
+};
+
 // --- shared spawn helpers ---------------------------------------------------
 
 const TIME_RE = /(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/;
@@ -272,11 +358,13 @@ const cleanupFolder = (folder: string, keep?: boolean) => {
   const fs = window.require('fs');
   const path = window.require('path');
   try {
+    // This is our own managed render folder — clear everything in it, then
+    // remove the folder itself so nothing is left behind.
     for (const f of fs.readdirSync(folder)) {
-      if (/\.(png|mov)$/i.test(f)) fs.unlinkSync(path.join(folder, f));
+      try { fs.unlinkSync(path.join(folder, f)); } catch { /* skip locked/dirs */ }
     }
     fs.rmdirSync(folder);
-  } catch { /* leave temp files if cleanup fails */ }
+  } catch { /* leave files if cleanup fails */ }
 };
 
 // --- public pipelines -------------------------------------------------------

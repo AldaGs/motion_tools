@@ -27,7 +27,10 @@ export default function MotionGifsSettings() {
   };
 
   return (
-    <div style={{ height: '100vh', overflowY: 'auto', color: 'var(--panel-fg)', fontSize: 12, padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div className="mg-settings" style={{ height: '100vh', overflowY: 'auto', color: 'var(--panel-fg)', fontSize: 12, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {/* Hide the scrollbar chrome; scrolling still works if the panel is
+          resized below the content height. */}
+      <style>{`.mg-settings{scrollbar-width:none;-ms-overflow-style:none;}.mg-settings::-webkit-scrollbar{width:0;height:0;display:none;}`}</style>
       <div style={{ fontWeight: 700, fontSize: 13 }}>Motion GIFS — Settings</div>
 
       <Field label="Template">
@@ -75,6 +78,15 @@ export default function MotionGifsSettings() {
       <Check checked={s.loopForever} onChange={(v) => set('loopForever', v)} label="Loop forever" />
       <Check checked={s.keepFrames} onChange={(v) => set('keepFrames', v)} label="Keep intermediate frames" />
 
+      <Check checked={s.renderInBackground} onChange={(v) => set('renderInBackground', v)}
+        label="Render in background (keep editing)" />
+      {s.renderInBackground && (
+        <div style={{ fontSize: 10, color: 'var(--panel-fg-muted)', marginTop: -8, lineHeight: 1.4 }}>
+          Renders via aerender so After Effects stays editable. The project is saved
+          first and rendered from disk — edits made after you start won't be included.
+        </div>
+      )}
+
       <div style={{ height: 1, background: 'var(--panel-border)', margin: '2px 0' }} />
       <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: 'var(--panel-fg-muted)' }}>After export</div>
       <Check checked={s.openFolder} onChange={(v) => set('openFolder', v)} label="Open output folder" />
@@ -95,7 +107,7 @@ const rowWrap: React.CSSProperties = { display: 'flex', alignItems: 'center', ga
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
       <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: 'var(--panel-fg-muted)' }}>{label}</span>
       {children}
     </div>
