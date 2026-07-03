@@ -27,6 +27,19 @@ const CONTEXT_VALUES: ProfileContext[] = [
   'nullLayer', 'solidLayer', 'precomp', 'footageLayer', 'mixed',
 ];
 
+// Which slice of settings this panel is responsible for. Each toolbar now has
+// its own dedicated (nameless) Modeless settings panel; the legacy shared
+// `dialog` extension still shows everything ('all') and hosts the Tool Editor.
+type SettingsScope = 'toolbar' | 'easing' | 'all';
+const SETTINGS_SCOPE: SettingsScope = (() => {
+  if (typeof window.__adobe_cep__ !== 'undefined') {
+    const extId = window.__adobe_cep__.getExtensionId();
+    if (extId === 'com.motiontoolbar.panel.toolbarsettings') return 'toolbar';
+    if (extId === 'com.motiontoolbar.panel.easingsettings') return 'easing';
+  }
+  return 'all';
+})();
+
 export default function DialogApp() {
   const [appData, setAppData] = useState<AppData | null>(null);
   const [dialogMode, setDialogMode] = useState<'settings' | 'macro' | null>(null);
@@ -104,6 +117,14 @@ export default function DialogApp() {
   useEffect(() => {
     // Initial load
     setAppData(loadConfig());
+
+    // Dedicated settings panels (toolbar / easing) are settings-only: they're
+    // opened via requestOpenExtension without a payload, and must never fall
+    // into the Tool Editor even if a stale macro payload is lingering on disk.
+    if (SETTINGS_SCOPE !== 'all') {
+      setDialogMode('settings');
+      return;
+    }
 
     const data = getDialogPayload();
     if (data) {
@@ -587,7 +608,11 @@ export default function DialogApp() {
           turn that into a Cancel for macro mode automatically. */}
       <div style={{ ['-webkit-app-region' as any]: 'drag', height: '30px', display: 'flex', alignItems: 'center', backgroundColor: 'var(--panel-bg-sunken)', borderBottom: '1px solid var(--panel-border)', padding: '0 10px', flexShrink: 0 }}>
         <span style={{ fontSize: '11px', color: 'var(--panel-fg-dim)', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-          {dialogMode === 'macro' ? 'Tool Editor' : dialogMode === 'settings' ? 'Settings' : 'Dialog'}
+          {dialogMode === 'macro'
+            ? 'Tool Editor'
+            : dialogMode === 'settings'
+              ? (SETTINGS_SCOPE === 'toolbar' ? 'Toolbar Settings' : SETTINGS_SCOPE === 'easing' ? 'Easing Settings' : 'Settings')
+              : 'Dialog'}
         </span>
       </div>
 
@@ -729,7 +754,12 @@ export default function DialogApp() {
 
         {dialogMode === 'settings' && (
           <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '15px', fontSize: '12px' }}>
-            <h4 style={{ margin: 0, fontSize: '14px', color: 'var(--panel-fg)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '8px' }}>Settings</h4>
+            <h4 style={{ margin: 0, fontSize: '14px', color: 'var(--panel-fg)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '8px' }}>
+              {SETTINGS_SCOPE === 'toolbar' ? 'Toolbar Settings' : SETTINGS_SCOPE === 'easing' ? 'Easing Settings' : 'Settings'}
+            </h4>
+
+            {/* ===== TOOLBAR (macros) SETTINGS ===== */}
+            {SETTINGS_SCOPE !== 'easing' && (<>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <label>Auto-Context Switching</label>
               <input type="checkbox" checked={appData.settings.enableContext} onChange={(e) => updateSetting('enableContext', e.target.checked)} />
@@ -739,10 +769,6 @@ export default function DialogApp() {
               <input type="range" min="40" max="200" value={appData.settings.buttonSize} onChange={(e) => updateSetting('buttonSize', parseInt(e.target.value))} />
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-              <label>Bezier Button Size ({appData.settings.bezierButtonSize ?? 40}px)</label>
-              <input type="range" min="10" max="200" value={appData.settings.bezierButtonSize ?? 40} onChange={(e) => updateSetting('bezierButtonSize', parseInt(e.target.value))} />
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
               <label>Grid Spacing ({appData.settings.spacing}px)</label>
               <input type="range" min="0" max="24" value={appData.settings.spacing} onChange={(e) => updateSetting('spacing', parseInt(e.target.value))} />
             </div>
@@ -750,17 +776,32 @@ export default function DialogApp() {
             <hr style={{ borderColor: 'var(--panel-border)', width: '100%', margin: '5px 0' }} />
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <label>Command Palette (Ctrl+Space)</label>
+              <label>Command Palette</label>
               <input type="checkbox" checked={appData.settings.enableCommandPalette ?? false} onChange={(e) => updateSetting('enableCommandPalette', e.target.checked)} />
             </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <label>Easing Click-to-Apply</label>
-              <input type="checkbox" checked={appData.settings.easingClickToApply ?? false} onChange={(e) => updateSetting('easingClickToApply', e.target.checked)} />
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <label>Live Curve Preview</label>
-              <input type="checkbox" checked={appData.settings.showCurvePreview ?? false} onChange={(e) => updateSetting('showCurvePreview', e.target.checked)} />
-            </div>
+            {(appData.settings.enableCommandPalette ?? false) && (
+              <div style={{ display: 'flex', gap: '6px', alignItems: 'center', paddingLeft: '12px' }}>
+                <label style={{ color: 'var(--panel-fg-muted)', fontSize: '11px', flexShrink: 0 }}>Palette Hotkey</label>
+                <input
+                  type="text"
+                  readOnly
+                  value={appData.settings.commandPaletteHotkey || 'Ctrl+Space'}
+                  onKeyDown={(e) => {
+                    e.preventDefault();
+                    // Esc / Backspace restore the default combo.
+                    if (e.code === 'Escape' || e.code === 'Backspace') {
+                      updateSetting('commandPaletteHotkey', 'Ctrl+Space');
+                      return;
+                    }
+                    const combo = formatHotkey(e);
+                    if (!combo) return; // pure modifier press — wait for the real key
+                    updateSetting('commandPaletteHotkey', combo);
+                  }}
+                  title="Click and press a key combo. Esc or Backspace resets to Ctrl+Space."
+                  style={{ flex: 1, padding: '6px 8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', fontSize: '12px', cursor: 'pointer' }}
+                />
+              </div>
+            )}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <label>Lock Macros Panel</label>
               <input type="checkbox" checked={appData.settings.lockMacros ?? false} onChange={(e) => updateSetting('lockMacros', e.target.checked)} />
@@ -814,6 +855,32 @@ export default function DialogApp() {
               })}
             </div>
 
+            {/* MACROS IMPORT / EXPORT */}
+            <hr style={{ borderColor: 'var(--panel-border)', width: '100%', margin: '5px 0' }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              <label style={{ color: 'var(--panel-fg)', fontSize: '13px', fontWeight: 600 }}>Macros</label>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <button onClick={handleExportMacros} style={{ flex: 1, padding: '8px', backgroundColor: 'var(--accent)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Export</button>
+                <button onClick={handleImportMacros} style={{ flex: 1, padding: '8px', backgroundColor: 'var(--success)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Import</button>
+              </div>
+            </div>
+            </>)}
+
+            {/* ===== EASING SETTINGS ===== */}
+            {SETTINGS_SCOPE !== 'toolbar' && (<>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              <label>Bezier Button Size ({appData.settings.bezierButtonSize ?? 40}px)</label>
+              <input type="range" min="10" max="200" value={appData.settings.bezierButtonSize ?? 40} onChange={(e) => updateSetting('bezierButtonSize', parseInt(e.target.value))} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label>Easing Click-to-Apply</label>
+              <input type="checkbox" checked={appData.settings.easingClickToApply ?? false} onChange={(e) => updateSetting('easingClickToApply', e.target.checked)} />
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label>Live Curve Preview</label>
+              <input type="checkbox" checked={appData.settings.showCurvePreview ?? false} onChange={(e) => updateSetting('showCurvePreview', e.target.checked)} />
+            </div>
+
             {/* EASING PROFILES SECTION */}
             <hr style={{ borderColor: 'var(--panel-border)', width: '100%', margin: '5px 0' }} />
             <div ref={easingProfilesSectionRef} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -857,19 +924,14 @@ export default function DialogApp() {
 
             <hr style={{ borderColor: 'var(--panel-border)', width: '100%', margin: '5px 0' }} />
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <label style={{ color: 'var(--panel-fg)', fontSize: '13px', fontWeight: 600 }}>Macros</label>
-              <div style={{ display: 'flex', gap: '6px' }}>
-                <button onClick={handleExportMacros} style={{ flex: 1, padding: '8px', backgroundColor: 'var(--accent)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Export</button>
-                <button onClick={handleImportMacros} style={{ flex: 1, padding: '8px', backgroundColor: 'var(--success)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Import</button>
-              </div>
-
-              <label style={{ color: 'var(--panel-fg)', fontSize: '13px', fontWeight: 600, marginTop: '6px' }}>Easing Presets</label>
+              <label style={{ color: 'var(--panel-fg)', fontSize: '13px', fontWeight: 600 }}>Easing Presets</label>
               <div style={{ display: 'flex', gap: '6px' }}>
                 <button onClick={handleExportEasing} title="Export the active easing profile" style={{ flex: 1, padding: '8px', backgroundColor: 'var(--accent)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Export active</button>
                 <button onClick={handleExportAllEasingProfiles} title="Export all easing profiles into one file" style={{ flex: 1, padding: '8px', backgroundColor: 'var(--panel-bg-elev)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Export all</button>
                 <button onClick={handleImportEasing} title="Import a Flow library or Motion Toolbar easing pack" style={{ flex: 1, padding: '8px', backgroundColor: 'var(--success)', color: 'white', border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer' }}>Import</button>
               </div>
             </div>
+            </>)}
           </div>
         )}
 

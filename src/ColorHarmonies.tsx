@@ -10,6 +10,7 @@ import {
   ALL_HARMONIES,
 } from './utils/color';
 import { toast } from './utils/toast';
+import ContextMenu, { type ContextMenuItem } from './components/ContextMenu';
 import { loadColorState, saveColorState } from './utils/storage';
 
 // Restore the previous session's config so a fresh panel open picks up where
@@ -96,6 +97,7 @@ export default function ColorHarmonies({ onAddToPalette }: Props = {}) {
   );
   const R = wheelSize / 2;
   const wheelRef = useRef<HTMLDivElement>(null);
+  const [swatchMenu, setSwatchMenu] = useState<{ x: number; y: number; color: HSL } | null>(null);
 
   const baseHex = useMemo(() => hslToHex(base), [base]);
 
@@ -169,10 +171,10 @@ export default function ColorHarmonies({ onAddToPalette }: Props = {}) {
   const basePos = hslToXY(base.h, base.s, R);
 
   return (
-    <div style={{ padding: '18px', display: 'flex', flexDirection: 'column', gap: '18px' }}>
+    <div style={{ padding: '8px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
 
       {/* ---- Wheel + controls (stacked, wheel centered) ---- */}
-      <div className="mc-card" style={{ display: 'flex', flexDirection: 'column', gap: '14px', alignItems: 'stretch' }}>
+      <div className="mc-card" style={{ display: 'flex', flexDirection: 'column', gap: '10px', alignItems: 'stretch' }}>
         {/* Centered wheel with a size handle in the corner */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
           <div
@@ -315,7 +317,9 @@ export default function ColorHarmonies({ onAddToPalette }: Props = {}) {
                       if (onAddToPalette && (e.altKey || e.shiftKey)) sendToPalette([c]);
                       else copy(hex);
                     }}
-                    title={onAddToPalette ? `${hex} — click to copy · Alt/Shift-click → palette` : `${hex} — click to copy`}
+                    onMouseDown={(e) => { if (e.button === 2) { e.preventDefault(); e.stopPropagation(); setSwatchMenu({ x: e.clientX, y: e.clientY, color: c }); } }}
+                    onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                    title={`${hex} — click to copy · right-click for menu`}
                     style={{
                       flex: 1, backgroundColor: hex, cursor: 'pointer', position: 'relative',
                       display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 4,
@@ -333,6 +337,16 @@ export default function ColorHarmonies({ onAddToPalette }: Props = {}) {
         ))}
       </div>
       </div>
+
+      {swatchMenu && (() => {
+        const c = swatchMenu.color;
+        const hex = hslToHex(c);
+        const items: ContextMenuItem[] = [];
+        if (onAddToPalette) items.push({ id: 'send', icon: '→', label: 'Send to palette', onSelect: () => sendToPalette([c]) });
+        items.push({ id: 'copy', icon: '⧉', label: `Copy ${hex}`, onSelect: () => copy(hex) });
+        items.push({ id: 'key', icon: '◎', label: 'Set as key color', divider: !!onAddToPalette, onSelect: () => applyBase(c) });
+        return <ContextMenu x={swatchMenu.x} y={swatchMenu.y} items={items} onClose={() => setSwatchMenu(null)} />;
+      })()}
     </div>
   );
 }

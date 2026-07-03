@@ -1,7 +1,7 @@
 // src/EasingEditor.tsx
 import React, { useState, useRef, useEffect } from 'react';
 import { evalScript } from './utils/adobe';
-import { loadConfig, saveConfig, getActiveEasingProfile, setActiveEases, setActiveEasingProfileId, setDialogPayload } from './utils/storage';
+import { loadConfig, saveConfig, getActiveEasingProfile, setActiveEases, setActiveEasingProfileId } from './utils/storage';
 import { subscribeConfigChanges } from './utils/configWatcher';
 import { toast } from './utils/toast';
 import { Download, Save, FileUp, ChevronsRightLeft, ChevronRight, ChevronLeft } from 'lucide-react';
@@ -316,12 +316,11 @@ export default function EasingEditor() {
     saveConfig(next);
   };
 
-  // Open the dialog panel scrolled to the easing-profiles section. Mirrors
-  // the macros panel's openDialog flow.
+  // Open the dedicated (nameless) Easing settings panel, which hosts the
+  // easing-profiles manager.
   const openEasingProfilesManager = () => {
     if (typeof window.__adobe_cep__ !== 'undefined') {
-      setDialogPayload({ mode: 'settings', focus: 'easingProfiles' });
-      window.__adobe_cep__.requestOpenExtension('com.motiontoolbar.panel.dialog', '');
+      window.__adobe_cep__.requestOpenExtension('com.motiontoolbar.panel.easingsettings', '');
     } else {
       toast.error("Profile manager opens in CEP only.");
     }
