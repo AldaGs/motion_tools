@@ -689,6 +689,172 @@ function applyColorToSelection(hex, mode) {
     }
 }
 
+// ==========================================================================
+// MOTION GIFS — render the active comp using a bundled output-module template,
+// then hand the rendered result to the panel (Node runs ffmpeg/gifski).
+//
+// Ported from GIPHER. The template names (GIPHER_RGBA_PNG, …) and the carrier
+// project `gipher_templates.aepx` keep their original names on purpose — old
+// easter egg. Unlike GIPHER, this does NOT shell out to the binaries here; it
+// only renders and returns { mode, base, … } as JSON for the panel to encode.
+//
+// Template index → [outputModuleTemplateName, aepxCompName]:
+//   0  Gipher_RGBA_PNG        GIPHER_RGBA_PNG      (PNG sequence, alpha)
+//   1  Gipher_RGB_PNG         GIPHER_RGB_PNG       (PNG sequence)
+//   2  Gipher_ProRes_444_Alpha GIPHER_RGBA_ProRes  (ProRes 4444, alpha)
+//   3  Gipher_ProRes_422      GIPHER_RGB_ProRes    (ProRes 422)
+var GIPH_TEMPLATES = [
+    ["Gipher_RGBA_PNG",        "GIPHER_RGBA_PNG"],
+    ["Gipher_RGB_PNG",         "GIPHER_RGB_PNG"],
+    ["Gipher_ProRes_444_Alpha","GIPHER_RGBA_ProRes"],
+    ["Gipher_ProRes_422",      "GIPHER_RGB_ProRes"]
+];
+
+function _giphComp() {
+    var comp = app.project.activeItem;
+    return (comp && comp instanceof CompItem) ? comp : null;
+}
+
+function _giphRenderQueue() {
+    var rq = app.project.renderQueue;
+    return (rq && rq instanceof RenderQueue) ? rq : null;
+}
+
+function _giphClearRenderQueue(queue) {
+    for (var i = queue.numItems; i >= 1; i--) queue.item(i).remove();
+}
+
+function _giphIsTemplate(module, templateName) {
+    for (var i = 0; i < module.templates.length; i++) {
+        if (module.templates[i] == templateName) return true;
+    }
+    return false;
+}
+
+// Find a render-queue item by the name of its source comp (used to locate the
+// items the .aepx brings in, each named after its template).
+function _giphRenderItemByCompName(queue, compName) {
+    for (var i = 1; i <= queue.numItems; i++) {
+        if (queue.item(i).comp.name == compName) return i;
+    }
+    return -1;
+}
+
+// Ensure `templateName` exists as a saved output-module template. If it isn't
+// already registered in the user's AE, import the carrier .aepx (which contains
+// a render item named `aepxCompName` whose output module holds the desired
+// settings), save those settings as a named template, then remove the import.
+function _giphEnsureTemplate(templateFilePath, templateName, aepxCompName) {
+    var queue = _giphRenderQueue();
+    if (!queue) return false;
+
+    var templateFile = new File(templateFilePath);
+    if (!templateFile.exists) return false;
+
+    var imported = app.project.importFile(new ImportOptions(templateFile));
+    var itemIdx = _giphRenderItemByCompName(queue, aepxCompName);
+    if (itemIdx < 0) { try { imported.remove(); } catch (e) {} return false; }
+
+    var module = queue.item(itemIdx).outputModule(1);
+    if (!_giphIsTemplate(module, templateName)) {
+        module.saveAsTemplate(templateName);
+    }
+    // The .aepx render item was appended to the queue purely to lift its
+    // template; drop it plus the imported project item so we don't render it.
+    try { queue.item(itemIdx).remove(); } catch (e) {}
+    try { imported.remove(); } catch (e) {}
+    return true;
+}
+
+// incrementName + helpers, ported so repeated exports don't clobber prior files.
+function _giphFileName(displayName, ext) { return displayName.slice(0, displayName.length - ext.length); }
+function _giphIsIncrement(name) { return !isNaN(name.split("-").pop()); }
+function _giphGetIncrement(name) { return name.split("-").pop(); }
+function _giphIncrementName(filePath, ext) {
+    var file = File(filePath.replace(/\\/g, "/"));
+    var folder = Folder(file.parent);
+    var exists = file.exists;
+    var fileName = file.displayName;
+    var increment = 1;
+    while (exists) {
+        var name = _giphFileName(file.displayName, ext);
+        if (!_giphIsIncrement(name)) {
+            fileName = name + "-" + increment + ext;
+            file = File(folder.fsName + "\\" + fileName);
+        } else {
+            increment = _giphGetIncrement(name);
+            file = File(folder.fsName + "\\" + name.slice(0, -(String(increment).length)) + (parseInt(increment) + 1) + ext);
+        }
+        if (!file.exists) { fileName = file.displayName; exists = false; }
+    }
+    return fileName;
+}
+
+function _giphSubFolder(parent, name) {
+    var f = Folder(parent.fsName + name);
+    if (!f.exists) f.create();
+    return f;
+}
+
+// Public entry point. optsJSON: { templateIndex, outputFolder, templateFile }
+// Returns JSON: { ok, mode:'png'|'prores', base, folder, name, width, height,
+//                 frameRate } or { ok:false, error }.
+function giphRenderComp(optsJSON) {
+    try {
+        var opts = JSON.parse(optsJSON);
+        var comp = _giphComp();
+        if (!comp) return JSON.stringify({ ok: false, error: "Open a composition first." });
+
+        var idx = parseInt(opts.templateIndex);
+        if (isNaN(idx) || idx < 0 || idx >= GIPH_TEMPLATES.length) idx = 0;
+        var templateName = GIPH_TEMPLATES[idx][0];
+        var aepxCompName = GIPH_TEMPLATES[idx][1];
+        var mode = (templateName.indexOf("PNG") != -1) ? "png" : "prores";
+        var ext = (mode === "png") ? ".png" : ".mov";
+
+        var outFolder = Folder(opts.outputFolder);
+        if (!outFolder.exists) return JSON.stringify({ ok: false, error: "Output folder is invalid." });
+
+        // Render into a dedicated subfolder so intermediate frames are easy to
+        // clean up later (mirrors GIPHER's "GIPHERrender").
+        var renderFolder = _giphSubFolder(outFolder, "\\GIPHERrender");
+
+        var queue = _giphRenderQueue();
+        if (!queue) return JSON.stringify({ ok: false, error: "Render queue unavailable." });
+        _giphClearRenderQueue(queue);
+
+        var baseName = String(comp.name).replace(/\s/g, "");
+        var outFile = File(renderFolder.fsName + "\\" + baseName + ext);
+        outFile = File(renderFolder.fsName + "\\" + _giphIncrementName(outFile.fsName, ext));
+
+        var item = queue.items.add(comp);
+        var module = item.outputModule(1);
+        module.file = outFile;
+
+        if (!_giphIsTemplate(module, templateName)) {
+            var ok = _giphEnsureTemplate(opts.templateFile, templateName, aepxCompName);
+            if (!ok) return JSON.stringify({ ok: false, error: "Could not install template: " + templateName });
+        }
+        module.applyTemplate(templateName);
+        queue.render();
+
+        var base = outFile.fsName.slice(0, -ext.length); // path without extension
+        return JSON.stringify({
+            ok: true,
+            mode: mode,
+            base: base,
+            folder: renderFolder.fsName,
+            name: baseName,
+            width: comp.width,
+            height: comp.height,
+            frameRate: comp.frameRate,
+            duration: comp.duration
+        });
+    } catch (err) {
+        return JSON.stringify({ ok: false, error: err.toString() });
+    }
+}
+
 // Returns a JSON array of unique hex strings (no '#'), or "Error:"/"Warning:".
 function extractColorsFromSelection() {
     try {

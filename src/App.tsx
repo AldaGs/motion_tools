@@ -7,6 +7,7 @@ import type { AppData, Macro, Profile } from './types';
 import EasingEditor from './EasingEditor';
 import DialogApp from './DialogApp';
 import MotionColor from './MotionColor';
+import MotionGifs from './MotionGifs';
 import CommandPalette from './components/CommandPalette';
 import ContextMenu, { type ContextMenuItem } from './components/ContextMenu';
 import Toaster from './components/Toaster';
@@ -69,12 +70,13 @@ function App() {
   // Exact match against the IDs registered in CSXS/manifest.xml — a loose
   // substring would mis-route any future panel whose ID contained the words
   // "easing" or "dialog".
-  const view: 'macros' | 'easing' | 'dialog' | 'color' = (() => {
+  const view: 'macros' | 'easing' | 'dialog' | 'color' | 'gifs' = (() => {
     if (typeof window.__adobe_cep__ !== 'undefined') {
       const extId = window.__adobe_cep__.getExtensionId();
       if (extId === 'com.motiontoolbar.panel.easing') return 'easing';
       if (extId === 'com.motiontoolbar.panel.dialog') return 'dialog';
       if (extId === 'com.motiontoolbar.panel.color') return 'color';
+      if (extId === 'com.motiontoolbar.panel.gifs') return 'gifs';
     }
     return 'macros';
   })();
@@ -444,6 +446,15 @@ function App() {
     return (
       <>
         <MotionColor />
+        <Toaster />
+      </>
+    );
+  }
+
+  if (view === 'gifs') {
+    return (
+      <>
+        <MotionGifs />
         <Toaster />
       </>
     );

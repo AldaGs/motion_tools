@@ -44,3 +44,7 @@ audit*.html
 .debug
 .zxp
 *.jsx.bin
+
+# Bundled GIF binaries (provided per-machine / at package time; see bin/README.md)
+bin/win/
+bin/mac/
