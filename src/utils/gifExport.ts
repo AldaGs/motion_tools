@@ -124,6 +124,59 @@ export const resolveBinaries = (): GifBinaries => {
   return { ffmpeg, gifski, ok: ffmpegExists && gifskiExists, ffmpegExists, gifskiExists };
 };
 
+// --- post-export OS actions -------------------------------------------------
+
+/** Reveal a file in Explorer/Finder (selected). Best-effort, fire-and-forget. */
+export const revealFile = (file: string): void => {
+  const cp = window.require('child_process');
+  try {
+    if (platformDir() === 'win') {
+      cp.spawn('explorer.exe', ['/select,', file.replace(/\//g, '\\')], { detached: true }).unref?.();
+    } else {
+      cp.spawn('open', ['-R', file], { detached: true }).unref?.();
+    }
+  } catch { /* ignore */ }
+};
+
+/** Open a file in the OS default application (plays the GIF). */
+export const playFile = (file: string): void => {
+  const cp = window.require('child_process');
+  try {
+    if (platformDir() === 'win') {
+      cp.spawn('cmd', ['/c', 'start', '', file], { detached: true }).unref?.();
+    } else {
+      cp.spawn('open', [file], { detached: true }).unref?.();
+    }
+  } catch { /* ignore */ }
+};
+
+/**
+ * Probe a video's native pixel size and frame rate by parsing `ffmpeg -i`
+ * stderr (ffmpeg exits non-zero with no output file — expected, we just read).
+ * Used by the "as comp" size/fps options in the convert-video flow.
+ */
+export const probeVideo = (input: string): Promise<{ width: number; height: number; fps: number }> => {
+  const { spawn } = window.require('child_process');
+  const bins = resolveBinaries();
+  return new Promise((resolve) => {
+    let out = '';
+    let proc;
+    try { proc = spawn(bins.ffmpeg, ['-i', input]); }
+    catch { return resolve({ width: 0, height: 0, fps: 0 }); }
+    proc.stderr.on('data', (b: any) => { out += String(b); });
+    proc.on('error', () => resolve({ width: 0, height: 0, fps: 0 }));
+    proc.on('close', () => {
+      const dim = out.match(/,\s*(\d{2,5})x(\d{2,5})/);
+      const fpsM = out.match(/([\d.]+)\s*fps/);
+      resolve({
+        width: dim ? +dim[1] : 0,
+        height: dim ? +dim[2] : 0,
+        fps: fpsM ? Math.round(parseFloat(fpsM[1])) : 0,
+      });
+    });
+  });
+};
+
 // --- shared spawn helpers ---------------------------------------------------
 
 const TIME_RE = /(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/;

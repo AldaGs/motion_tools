@@ -578,6 +578,65 @@ export const saveColorSettings = (settings: ColorSettings) => {
   } catch (e) { }
 };
 
+// Motion GIFS panel preferences. Every user-facing option lives here; the main
+// panel only shows export buttons + progress, and the floating settings panel
+// edits this file. Persisted independently in gifSettings.json.
+export interface GifSettings {
+  templateIndex: number;
+  outputDir: string;
+  sizeMode: 'comp' | 'custom';   // 'comp' = keep the comp's width
+  width: number;
+  fpsMode: 'comp' | 'custom';    // 'comp' = keep the comp's frame rate
+  fps: number;
+  quality: number;               // gifski 1–100
+  loopForever: boolean;
+  keepFrames: boolean;
+  openFolder: boolean;           // reveal the GIF in Explorer/Finder after export
+  playAfter: boolean;            // open the GIF in the default player after export
+}
+
+const GIF_SETTINGS_DEFAULTS: GifSettings = {
+  templateIndex: 0,
+  outputDir: '',
+  sizeMode: 'comp',
+  width: 540,
+  fpsMode: 'comp',
+  fps: 12,
+  quality: 70,
+  loopForever: true,
+  keepFrames: false,
+  openFolder: false,
+  playAfter: true,
+};
+
+export const loadGifSettings = (): GifSettings => {
+  try {
+    const fs = window.require('fs');
+    const path = window.require('path');
+    const configPath = getConfigPath();
+    if (configPath) {
+      const p = path.join(path.dirname(configPath), 'gifSettings.json');
+      if (fs.existsSync(p)) {
+        const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+        return { ...GIF_SETTINGS_DEFAULTS, ...parsed };
+      }
+    }
+  } catch (e) { }
+  return { ...GIF_SETTINGS_DEFAULTS };
+};
+
+export const saveGifSettings = (settings: GifSettings) => {
+  try {
+    const fs = window.require('fs');
+    const path = window.require('path');
+    const configPath = getConfigPath();
+    if (configPath) {
+      const p = path.join(path.dirname(configPath), 'gifSettings.json');
+      fs.writeFileSync(p, JSON.stringify(settings), 'utf8');
+    }
+  } catch (e) { }
+};
+
 // --- Named color palettes -------------------------------------------------
 // Each palette is a JSON file { name, colors: string[] } inside a "Palettes"
 // folder next to the config, so they're easy to browse/back up on disk.

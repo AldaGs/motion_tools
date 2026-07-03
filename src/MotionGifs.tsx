@@ -1,20 +1,22 @@
 // src/MotionGifs.tsx
 //
-// "Motion GIFS" panel — a CEP port of the GIPHER ScriptUI script.
-//
-// Primary flow: pick an output-module template + folder, hit Export. The host
-// script (giphRenderComp) renders the active comp with the bundled template and
-// returns a result; Node then runs the ffmpeg/gifski pipeline (utils/gifExport)
-// and drives the 0–100 progress bar. A secondary "Convert video" flow feeds an
-// arbitrary existing video through the same encoder.
+// "Motion GIFS" main panel — deliberately minimal. It shows only the export
+// actions, a progress bar, and a Settings button. Every option (template,
+// output folder, size/fps, quality, loop, open-folder, play-after, …) lives in
+// the floating settings panel (MotionGifsSettings) and is read from disk at
+// export time via loadGifSettings().
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { evalScript, isCEPEnvironment } from './utils/adobe';
+import { loadGifSettings, type GifSettings } from './utils/storage';
 import {
-  resolveBinaries, encodeRenderToGif, convertVideoToGif, templateFilePath,
-  GIF_TEMPLATES, type GifBinaries, type RenderResult,
+  resolveBinaries, encodeRenderToGif, convertVideoToGif, probeVideo,
+  revealFile, playFile, templateFilePath,
+  type GifBinaries, type RenderResult,
 } from './utils/gifExport';
 import { toast } from './utils/toast';
+
+const SETTINGS_EXT = 'com.motiontoolbar.panel.gifsettings';
 
 const tempFramesDir = (): string => {
   const os = window.require('os');
@@ -24,13 +26,7 @@ const tempFramesDir = (): string => {
 
 export default function MotionGifs() {
   const [bins, setBins] = useState<GifBinaries | null>(null);
-  const [templateIndex, setTemplateIndex] = useState(0);
-  const [outputDir, setOutputDir] = useState('');
-  const [width, setWidth] = useState(540);
-  const [fps, setFps] = useState(12);
-  const [quality, setQuality] = useState(70);
-  const [loopForever, setLoopForever] = useState(true);
-  const [keepFrames, setKeepFrames] = useState(false);
+  const [settings, setSettings] = useState<GifSettings | null>(null);
 
   const [running, setRunning] = useState(false);
   const [percent, setPercent] = useState(0);
@@ -40,95 +36,125 @@ export default function MotionGifs() {
   useEffect(() => {
     if (!isCEPEnvironment()) return;
     try { setBins(resolveBinaries()); } catch (e) { console.error(e); }
+    setSettings(loadGifSettings());
+    // Re-read settings whenever the panel regains focus — the floating settings
+    // panel live-saves to disk, so this picks up edits without any IPC.
+    const onFocus = () => setSettings(loadGifSettings());
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
   }, []);
 
-  const canExport = useMemo(
-    () => !!bins?.ok && !!outputDir && !running,
-    [bins, outputDir, running],
-  );
-
-  const browseOutput = async () => {
-    const res = await evalScript('var f = Folder.selectDialog("Output folder"); f ? f.fsName : "null"');
-    if (res && res !== 'null') setOutputDir(res);
-  };
+  const ready = !!bins?.ok && !!settings?.outputDir && !running;
+  const missing = bins && !bins.ok;
 
   const onProgress = (p: { percent: number; message: string }) => {
     setPercent(p.percent);
     setStatus(p.message);
   };
 
-  // Primary: render the active comp via the host template, then encode.
-  const handleExportComp = async () => {
-    if (!bins?.ok || runningRef.current || !outputDir) return;
-    const path = window.require('path');
+  const afterExport = (s: GifSettings, output: string) => {
+    if (s.openFolder) revealFile(output);
+    if (s.playAfter) playFile(output);
+    toast.info(`GIF saved: ${output}`);
+  };
 
+  const begin = (msg: string) => {
     runningRef.current = true;
     setRunning(true);
     setPercent(0);
-    setStatus('Rendering comp…');
+    setStatus(msg);
+  };
+  const end = () => { runningRef.current = false; setRunning(false); };
+
+  const openSettings = () => {
+    if (typeof window.__adobe_cep__ !== 'undefined') {
+      window.__adobe_cep__.requestOpenExtension(SETTINGS_EXT, '');
+    } else {
+      toast.error('Settings panel only works in the CEP environment.');
+    }
+  };
+
+  // Primary: render the active comp via the host template, then encode.
+  const handleExportComp = async () => {
+    const s = loadGifSettings();
+    if (!bins?.ok || runningRef.current || !s.outputDir) return;
+    const path = window.require('path');
+
+    begin('Rendering comp…');
     try {
-      const req = JSON.stringify({ templateIndex, outputFolder: outputDir, templateFile: templateFilePath() });
+      const req = JSON.stringify({ templateIndex: s.templateIndex, outputFolder: s.outputDir, templateFile: templateFilePath() });
       const raw = await evalScript(`giphRenderComp(${JSON.stringify(req)})`);
       let render: RenderResult;
       try { render = JSON.parse(raw); }
       catch { throw new Error(`Host render failed: ${raw}`); }
       if (!render.ok) throw new Error(render.error || 'Render failed.');
 
-      const output = path.join(outputDir, `${render.name}.gif`);
+      const width = s.sizeMode === 'comp' ? render.width : s.width;
+      const fps = s.fpsMode === 'comp' ? Math.round(render.frameRate) : s.fps;
+      const output = path.join(s.outputDir, `${render.name}.gif`);
+
       await encodeRenderToGif(
         render,
-        { output, width, fps, quality, loop: loopForever ? 0 : -1, keepFrames },
+        { output, width, fps, quality: s.quality, loop: s.loopForever ? 0 : -1, keepFrames: s.keepFrames },
         onProgress,
       );
-      toast.info(`GIF saved: ${output}`);
+      afterExport(s, output);
     } catch (e: any) {
       console.error(e);
       toast.error(e?.message ? `Export failed — ${e.message.split('\n')[0]}` : 'Export failed.');
     } finally {
-      runningRef.current = false;
-      setRunning(false);
+      end();
     }
   };
 
   // Secondary: convert an already-existing video file.
   const handleConvertVideo = async () => {
-    if (!bins?.ok || runningRef.current || !outputDir) return;
+    const s = loadGifSettings();
+    if (!bins?.ok || runningRef.current || !s.outputDir) return;
     const path = window.require('path');
     const res = await evalScript('var f = File.openDialog("Select a video"); f ? f.fsName : "null"');
     if (!res || res === 'null') return;
 
-    const base = path.basename(res).replace(/\.[^.]+$/, '') || 'output';
-    const output = path.join(outputDir, `${base}.gif`);
-
-    runningRef.current = true;
-    setRunning(true);
-    setPercent(0);
-    setStatus('Starting…');
+    begin('Probing video…');
     try {
+      // Resolve "as comp" against the source video's native metadata.
+      let width = s.width;
+      let fps = s.fps;
+      if (s.sizeMode === 'comp' || s.fpsMode === 'comp') {
+        const meta = await probeVideo(res);
+        if (s.sizeMode === 'comp' && meta.width) width = meta.width;
+        if (s.fpsMode === 'comp' && meta.fps) fps = meta.fps;
+      }
+
+      const base = path.basename(res).replace(/\.[^.]+$/, '') || 'output';
+      const output = path.join(s.outputDir, `${base}.gif`);
+
+      setStatus('Starting…');
       await convertVideoToGif(
         res,
-        { output, width, fps, quality, loop: loopForever ? 0 : -1, keepFrames, tempDir: tempFramesDir() },
+        { output, width, fps, quality: s.quality, loop: s.loopForever ? 0 : -1, keepFrames: s.keepFrames, tempDir: tempFramesDir() },
         onProgress,
       );
-      toast.info(`GIF saved: ${output}`);
+      afterExport(s, output);
     } catch (e: any) {
       console.error(e);
       toast.error(e?.message ? `Convert failed — ${e.message.split('\n')[0]}` : 'Convert failed.');
     } finally {
-      runningRef.current = false;
-      setRunning(false);
+      end();
     }
   };
 
-  const missing = bins && !bins.ok;
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', color: 'var(--panel-fg)', fontSize: 12 }}>
-      <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--panel-border)', background: 'var(--panel-bg-sunken)', fontWeight: 700 }}>
-        Motion GIFS
+      <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--panel-border)', background: 'var(--panel-bg-sunken)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span style={{ fontWeight: 700 }}>Motion GIFS</span>
+        <button onClick={openSettings} title="Settings"
+          style={{ padding: '4px 8px', fontSize: 12, borderRadius: 'var(--radius-sm)', border: '1px solid var(--panel-border)', background: 'var(--panel-bg-elev)', color: 'var(--panel-fg)', cursor: 'pointer' }}>
+          ⚙️
+        </button>
       </div>
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 12, padding: 16 }}>
         {missing && (
           <div style={{ padding: 10, borderRadius: 6, background: 'var(--danger)', color: '#fff', fontSize: 11 }}>
             Bundled binaries not found:
@@ -137,88 +163,41 @@ export default function MotionGifs() {
           </div>
         )}
 
-        <Field label="Template">
-          <select value={templateIndex} onChange={(e) => setTemplateIndex(+e.target.value)}
-            style={{ width: '100%', padding: '6px 8px', fontSize: 12, borderRadius: 4, border: '1px solid var(--panel-border)', background: 'var(--panel-bg)', color: 'var(--panel-fg)' }}>
-            {GIF_TEMPLATES.map((t, i) => (
-              <option key={i} value={i} style={{ background: 'var(--panel-bg-elev)' }}>{t.label}</option>
-            ))}
-          </select>
-        </Field>
-
-        <Field label="Output folder">
-          <div style={{ display: 'flex', gap: 6 }}>
-            <input readOnly value={outputDir} placeholder="Pick a folder…"
-              style={{ flex: 1, minWidth: 0, padding: '6px 8px', fontSize: 11, borderRadius: 4, border: '1px solid var(--panel-border)', background: 'var(--panel-bg)', color: 'var(--panel-fg)' }} />
-            <button onClick={browseOutput}
-              style={{ padding: '0 10px', borderRadius: 4, border: '1px solid var(--panel-border)', background: 'var(--panel-bg-elev)', color: 'var(--panel-fg)', cursor: 'pointer' }}>…</button>
+        {settings && !settings.outputDir && !missing && (
+          <div style={{ fontSize: 11, color: 'var(--panel-fg-muted)', textAlign: 'center' }}>
+            Set an output folder in <button onClick={openSettings} style={{ background: 'none', border: 'none', color: 'var(--accent, #3498db)', cursor: 'pointer', padding: 0, textDecoration: 'underline' }}>Settings</button> to enable export.
           </div>
-        </Field>
+        )}
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-          <NumField label="Width" value={width} min={1} onChange={setWidth} />
-          <NumField label="FPS" value={fps} min={1} onChange={setFps} />
-        </div>
+        <button onClick={handleExportComp} disabled={!ready}
+          style={{
+            padding: '14px', fontSize: 14, fontWeight: 700, borderRadius: 6,
+            border: '1px solid var(--panel-border)',
+            background: ready ? 'var(--accent, #3498db)' : 'var(--panel-bg-elev)',
+            color: ready ? '#fff' : 'var(--panel-fg-dim)',
+            cursor: ready ? 'pointer' : 'not-allowed',
+          }}>
+          {running ? 'Working…' : 'Export Active Comp → GIF'}
+        </button>
 
-        <Field label={`Quality — ${quality}`}>
-          <input type="range" min={1} max={100} value={quality}
-            onChange={(e) => setQuality(+e.target.value)} style={{ width: '100%' }} />
-        </Field>
-
-        <label style={checkRow}>
-          <input type="checkbox" checked={loopForever} onChange={(e) => setLoopForever(e.target.checked)} />
-          Loop forever
-        </label>
-        <label style={checkRow}>
-          <input type="checkbox" checked={keepFrames} onChange={(e) => setKeepFrames(e.target.checked)} />
-          Keep intermediate frames
-        </label>
-
-        <button onClick={handleConvertVideo} disabled={!canExport}
-          style={{ marginTop: 4, padding: '8px', fontSize: 11, borderRadius: 6, border: '1px solid var(--panel-border)', background: 'var(--panel-bg-elev)', color: 'var(--panel-fg)', cursor: canExport ? 'pointer' : 'not-allowed', opacity: canExport ? 1 : 0.6 }}>
-          Convert existing video…
+        <button onClick={handleConvertVideo} disabled={!ready}
+          style={{
+            padding: '10px', fontSize: 12, borderRadius: 6, border: '1px solid var(--panel-border)',
+            background: 'var(--panel-bg-elev)', color: 'var(--panel-fg)',
+            cursor: ready ? 'pointer' : 'not-allowed', opacity: ready ? 1 : 0.6,
+          }}>
+          Convert Existing Video → GIF
         </button>
       </div>
 
-      <div style={{ padding: 14, borderTop: '1px solid var(--panel-border)', background: 'var(--panel-bg-sunken)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ padding: 14, borderTop: '1px solid var(--panel-border)', background: 'var(--panel-bg-sunken)', display: 'flex', flexDirection: 'column', gap: 6 }}>
         <div style={{ height: 8, borderRadius: 4, background: 'var(--panel-bg-elev)', overflow: 'hidden' }}>
           <div style={{ width: `${percent}%`, height: '100%', background: 'var(--accent, #3498db)', transition: 'width 120ms linear' }} />
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--panel-fg-muted)', minHeight: 12 }}>
           <span>{status}</span><span>{percent}%</span>
         </div>
-        <button onClick={handleExportComp} disabled={!canExport}
-          style={{
-            padding: '10px', fontSize: 13, fontWeight: 700, borderRadius: 6,
-            border: '1px solid var(--panel-border)',
-            background: canExport ? 'var(--accent, #3498db)' : 'var(--panel-bg-elev)',
-            color: canExport ? '#fff' : 'var(--panel-fg-dim)',
-            cursor: canExport ? 'pointer' : 'not-allowed',
-          }}>
-          {running ? 'Working…' : 'Export active comp → GIF'}
-        </button>
       </div>
     </div>
-  );
-}
-
-const checkRow: React.CSSProperties = { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer' };
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <span style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.5, color: 'var(--panel-fg-muted)' }}>{label}</span>
-      {children}
-    </div>
-  );
-}
-
-function NumField({ label, value, min, onChange }: { label: string; value: number; min: number; onChange: (n: number) => void }) {
-  return (
-    <Field label={label}>
-      <input type="number" min={min} value={value}
-        onChange={(e) => onChange(Math.max(min, parseInt(e.target.value || String(min), 10)))}
-        style={{ width: '100%', padding: '6px 8px', fontSize: 12, borderRadius: 4, border: '1px solid var(--panel-border)', background: 'var(--panel-bg)', color: 'var(--panel-fg)' }} />
-    </Field>
   );
 }
