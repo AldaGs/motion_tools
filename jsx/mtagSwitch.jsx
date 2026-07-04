@@ -493,6 +493,113 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
     }
 }
 
+// ---------------- AI color extraction ----------------
+// Reads fill/stroke/both solid colors from the selected objects, deduplicates
+// them, and returns an array of upper-case hex strings (no '#' prefix) via
+// the standard {ok, data} envelope so evalJsx<string[]> can unwrap them.
+// mode: "fill" | "stroke" | "both"
+function mtagAiExtractColors(mode) {
+    try {
+        if (!app.documents || app.documents.length === 0) {
+            return _mtagErr("No open document.");
+        }
+        var doc = app.activeDocument;
+        var sel = doc.selection;
+        if (!sel || sel.length === 0) {
+            return _mtagErr("Nothing selected.");
+        }
+
+        function hexFromAiColor(c) {
+            if (!c) return null;
+            var rgb;
+            if (c.typename === "RGBColor") {
+                rgb = [c.red, c.green, c.blue];
+            } else if (c.typename === "CMYKColor") {
+                rgb = [
+                    Math.round((1 - c.cyan / 100) * (1 - c.black / 100) * 255),
+                    Math.round((1 - c.magenta / 100) * (1 - c.black / 100) * 255),
+                    Math.round((1 - c.yellow / 100) * (1 - c.black / 100) * 255)
+                ];
+            } else if (c.typename === "GrayColor") {
+                var v = Math.round((1 - c.gray / 100) * 255);
+                rgb = [v, v, v];
+            } else if (c.typename === "SpotColor") {
+                try { return hexFromAiColor(c.spot.color); } catch(e) { return null; }
+            } else if (c.typename === "GradientColor") {
+                // Return first gradient stop as a representative solid
+                try {
+                    var stops = c.gradient.gradientStops;
+                    if (stops.length > 0) return hexFromAiColor(stops[0].color);
+                } catch(e) {}
+                return null;
+            } else {
+                return null;
+            }
+            var toHex = function(n) {
+                var h = Math.min(255, Math.max(0, Math.round(n))).toString(16).toUpperCase();
+                return h.length === 1 ? "0" + h : h;
+            };
+            return toHex(rgb[0]) + toHex(rgb[1]) + toHex(rgb[2]);
+        }
+
+        var useFill = (mode === "fill" || mode === "both");
+        var useStroke = (mode === "stroke" || mode === "both");
+        var seen = {};
+        var result = [];
+
+        function collect(item) {
+            var src = item;
+            if (item.typename === "CompoundPathItem") {
+                src = item.pathItems && item.pathItems.length > 0 ? item.pathItems[0] : null;
+            }
+            if (!src) return;
+            if (useFill) {
+                try {
+                    if (src.filled && src.fillColor) {
+                        var h = hexFromAiColor(src.fillColor);
+                        if (h && !seen[h]) { seen[h] = true; result.push(h); }
+                    }
+                } catch(e) {}
+            }
+            if (useStroke) {
+                try {
+                    if (src.stroked && src.strokeColor) {
+                        var hs = hexFromAiColor(src.strokeColor);
+                        if (hs && !seen[hs]) { seen[hs] = true; result.push(hs); }
+                    }
+                } catch(e) {}
+            }
+        }
+
+        function walk(item) {
+            if (item.typename === "PathItem" || item.typename === "CompoundPathItem") {
+                collect(item);
+            } else if (item.typename === "TextFrame") {
+                try {
+                    var attrs = item.textRange.characterAttributes;
+                    if (useFill && attrs.fillColor) {
+                        var h = hexFromAiColor(attrs.fillColor);
+                        if (h && !seen[h]) { seen[h] = true; result.push(h); }
+                    }
+                    if (useStroke && attrs.strokeColor) {
+                        var hs = hexFromAiColor(attrs.strokeColor);
+                        if (hs && !seen[hs]) { seen[hs] = true; result.push(hs); }
+                    }
+                } catch(e) {}
+            } else if (item.typename === "GroupItem") {
+                for (var j = 0; j < item.pageItems.length; j++) walk(item.pageItems[j]);
+            }
+        }
+
+        for (var i = 0; i < sel.length; i++) walk(sel[i]);
+
+        if (result.length === 0) return _mtagErr("No solid colors found in the selection (" + mode + ").");
+        return _mtagOk(result);
+    } catch (e) {
+        return _mtagErr(e.toString());
+    }
+}
+
 // ---------------- shared helpers (AE side) ----------------
 
 // Map the schema's blend-mode string to AE's BlendingMode enum for layers.

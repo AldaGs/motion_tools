@@ -15,7 +15,9 @@ import LayersClearIcon from '@mui/icons-material/LayersClear';
 import FilterCenterFocusIcon from '@mui/icons-material/FilterCenterFocus';
 import CropFreeIcon from '@mui/icons-material/CropFree';
 import BugReportIcon from '@mui/icons-material/BugReport';
-import { IconButton, Tooltip } from '@mui/material';
+import PaletteIcon from '@mui/icons-material/Palette';
+import { IconButton, Menu, MenuItem, Tooltip } from '@mui/material';
+import { saveAiColorClip } from './utils/storage';
 
 const CLIENT_VERSION = '0.2.0-poc';
 const PORT_RANGE: [number, number] = [47821, 47830];
@@ -69,6 +71,30 @@ export default function MtagSwitch() {
   const [transport, setTransport] = useState<Transport>('bridgetalk');
   const [grouped, setGrouped] = useState(true);
   const [centerAnchor, setCenterAnchor] = useState(false);
+  const [pickMenuAnchor, setPickMenuAnchor] = useState<null | HTMLElement>(null);
+  const [lastPickInfo, setLastPickInfo] = useState<string | null>(null);
+
+  const pickColors = async (mode: 'fill' | 'stroke' | 'both') => {
+    setPickMenuAnchor(null);
+    setBusy(true);
+    setLastPickInfo(null);
+    try {
+      const hexes = await evalJsx<string[]>(`mtagAiExtractColors(${JSON.stringify(mode)})`);
+      if (!hexes || hexes.length === 0) {
+        setLastPickInfo('No colors found.');
+        return;
+      }
+      // Prefix with '#' for the Color panel.
+      const withHash = hexes.map(h => '#' + h.replace(/^#/, ''));
+      saveAiColorClip(withHash);
+      setLastPickInfo(`${withHash.length} color${withHash.length === 1 ? '' : 's'} saved to palette clipboard`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setLastPickInfo(`Error: ${msg}`);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -280,9 +306,38 @@ export default function MtagSwitch() {
                 <BugReportIcon />
               </IconButton>
             </Tooltip>
+
+            {/* Color pick — saves colors to aiColorClip.json for MTAG Color */}
+            <Tooltip title="Pick colors from selection → palette clipboard">
+              <span>
+                <IconButton
+                  disabled={busy}
+                  onClick={(e) => setPickMenuAnchor(e.currentTarget)}
+                  sx={{ color: busy ? '#555' : '#e2a14a' }}
+                >
+                  <PaletteIcon />
+                </IconButton>
+              </span>
+            </Tooltip>
+            <Menu
+              anchorEl={pickMenuAnchor}
+              open={Boolean(pickMenuAnchor)}
+              onClose={() => setPickMenuAnchor(null)}
+              slotProps={{ paper: { sx: { background: '#2a2a2a', color: '#ddd', minWidth: 130 } } }}
+            >
+              <MenuItem onClick={() => pickColors('fill')} sx={{ fontSize: 12 }}>Fill colors</MenuItem>
+              <MenuItem onClick={() => pickColors('stroke')} sx={{ fontSize: 12 }}>Stroke colors</MenuItem>
+              <MenuItem onClick={() => pickColors('both')} sx={{ fontSize: 12 }}>Fill + Stroke</MenuItem>
+            </Menu>
           </div>
         );
       })()}
+
+      {lastPickInfo && (
+        <div style={{ fontSize: 10, color: lastPickInfo.startsWith('Error') ? '#f88' : '#8f8', padding: '2px 4px' }}>
+          {lastPickInfo}
+        </div>
+      )}
 
       {host === 'ae' && (
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>

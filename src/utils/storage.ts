@@ -784,3 +784,34 @@ export const resolvePath = (relPath: string): string => {
   const agBase = path.join(userData, 'AGS-Extensions').replace(/\\/g, "/");
   return agBase + "/" + relPath.slice(5);
 };
+
+// ------------- AI → Color-panel color clip ---------------------------------
+// mtagSwitch (Illustrator side) calls saveAiColorClip after extracting colors
+// from the selection. MotionColor then calls loadAiColorClip to merge them
+// into the active palette. Stored as { colors: string[], ts: number }.
+
+export const saveAiColorClip = (colors: string[]): boolean => {
+  try {
+    const fs = window.require('fs');
+    const path = window.require('path');
+    const configPath = getConfigPath();
+    if (!configPath) return false;
+    const p = path.join(path.dirname(configPath), 'aiColorClip.json');
+    fs.writeFileSync(p, JSON.stringify({ colors, ts: Date.now() }), 'utf8');
+    return true;
+  } catch (e) { return false; }
+};
+
+export const loadAiColorClip = (): { colors: string[]; ts: number } | null => {
+  try {
+    const fs = window.require('fs');
+    const path = window.require('path');
+    const configPath = getConfigPath();
+    if (!configPath) return null;
+    const p = path.join(path.dirname(configPath), 'aiColorClip.json');
+    if (!fs.existsSync(p)) return null;
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!Array.isArray(parsed?.colors)) return null;
+    return { colors: parsed.colors.filter((c: unknown) => typeof c === 'string'), ts: parsed.ts || 0 };
+  } catch (e) { return null; }
+};

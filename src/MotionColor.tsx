@@ -4,6 +4,7 @@ import ColorPalette from './ColorPalette';
 import {
   loadPaletteWorkingState, savePaletteWorkingState, listPalettes, savePalette,
   loadColorSettings, saveColorSettings, type ColorSettings,
+  loadAiColorClip,
 } from './utils/storage';
 import { syncPaletteToProject, projectPaletteExists, getProjectPaletteColors } from './utils/aeColor';
 import { exportPalette, importPalette } from './utils/paletteIO';
@@ -62,6 +63,28 @@ export default function MotionColor() {
     setProjectHas(true);
     setLinkedToProject(true);
     toast.success(`Loaded ${c.length} color${c.length === 1 ? '' : 's'} from project.`);
+  };
+
+  const handleFromAi = () => {
+    const clip = loadAiColorClip();
+    if (!clip || clip.colors.length === 0) {
+      toast.info('No AI color clip found. Use the Palette button in MTAG Switch (Illustrator) first.');
+      return;
+    }
+    // Merge: deduplicate against existing palette
+    const normalized = clip.colors.map(norm);
+    setPaletteColors((prev) => {
+      const seen = new Set(prev.map(c => c.toUpperCase()));
+      const merged = [...prev];
+      for (const h of normalized) {
+        if (!seen.has(h.toUpperCase())) { seen.add(h.toUpperCase()); merged.push(h); }
+      }
+      return merged;
+    });
+    const age = Math.round((Date.now() - clip.ts) / 1000);
+    const ageStr = age < 60 ? `${age}s ago` : age < 3600 ? `${Math.round(age/60)}m ago` : `${Math.round(age/3600)}h ago`;
+    toast.success(`Added ${normalized.length} color${normalized.length === 1 ? '' : 's'} from AI (${ageStr}).`);
+    if (tab !== 'palette') setTab('palette');
   };
   const handleImport = () => {
     const p = importPalette();
@@ -136,6 +159,19 @@ export default function MotionColor() {
       <div style={{ position: 'relative', display: 'flex', flexShrink: 0, alignItems: 'stretch', backgroundColor: 'var(--panel-bg-sunken)', borderBottom: '1px solid var(--panel-border)' }}>
         {tabBtn('wheel', 'Color Wheel')}
         {tabBtn('palette', 'Color Palette', paletteColors.length)}
+        {/* From AI — reads aiColorClip.json written by MTAG Switch (Illustrator) */}
+        <button onClick={handleFromAi} title="Merge colors from Illustrator selection (via MTAG Switch)"
+          style={{
+            flexShrink: 0, padding: '0 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 600,
+            display: 'flex', alignItems: 'center', gap: 4,
+            backgroundColor: 'transparent',
+            color: 'var(--panel-fg-muted)',
+            border: 'none', borderLeft: '1px solid var(--panel-border)',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          <span style={{ fontSize: 14 }}>⬡</span> From AI
+        </button>
         <button onClick={() => setShowSettings((v) => !v)} title="Motion Color settings"
           style={{
             flexShrink: 0, width: 34, cursor: 'pointer',
