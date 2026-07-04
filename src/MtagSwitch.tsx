@@ -273,69 +273,73 @@ export default function MtagSwitch() {
         const tooltipProps = { slotProps: { tooltip: { sx: { fontSize: 13, padding: '6px 10px', backgroundColor: '#333' } } } };
 
         return (
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            <Tooltip title="Send to After Effects" {...tooltipProps}>
-              <span>
-                <IconButton 
-                  onClick={sendSelection} 
-                  disabled={!canSend}
-                  size="small"
-                  sx={{ 
-                    color: canSend ? '#dfd' : '#555', 
-                    background: canSend ? '#2a4a2a' : '#222', 
-                    '&:hover': { background: canSend ? '#3b5b3b' : '#222' } 
-                  }}
-                >
-                  <SendIcon fontSize="small" />
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+            {/* Row 1: Core switch tools & Diagnostics */}
+            <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+              <Tooltip title="Send to After Effects" {...tooltipProps}>
+                <span>
+                  <IconButton 
+                    onClick={sendSelection} 
+                    disabled={!canSend}
+                    size="small"
+                    sx={{ 
+                      width: 30, height: 30,
+                      color: canSend ? '#dfd' : '#555', 
+                      background: canSend ? '#2a4a2a' : '#222', 
+                      '&:hover': { background: canSend ? '#3b5b3b' : '#222' } 
+                    }}
+                  >
+                    <SendIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+
+              <Tooltip title={grouped ? "Grouped in one layer" : "Each in a different layer"} {...tooltipProps}>
+                <IconButton onClick={() => setGrouped(!grouped)} size="small" sx={{ width: 30, height: 30, color: grouped ? '#4a90e2' : '#888' }}>
+                  {grouped ? <LayersIcon fontSize="small" /> : <LayersClearIcon fontSize="small" />}
                 </IconButton>
-              </span>
-            </Tooltip>
+              </Tooltip>
 
-            <Tooltip title={grouped ? "Grouped in one layer" : "Each in a different layer"} {...tooltipProps}>
-              <IconButton onClick={() => setGrouped(!grouped)} size="small" sx={{ color: grouped ? '#4a90e2' : '#888' }}>
-                {grouped ? <LayersIcon fontSize="small" /> : <LayersClearIcon fontSize="small" />}
-              </IconButton>
-            </Tooltip>
-
-            <Tooltip title={centerAnchor ? "Center anchor point in layer" : "Default anchor point"} {...tooltipProps}>
-              <IconButton onClick={() => setCenterAnchor(!centerAnchor)} size="small" sx={{ color: centerAnchor ? '#4a90e2' : '#888' }}>
-                {centerAnchor ? <FilterCenterFocusIcon fontSize="small" /> : <CropFreeIcon fontSize="small" />}
-              </IconButton>
-            </Tooltip>
-
-            {/* Color pickers */}
-            <div style={{ width: 1, height: 20, backgroundColor: '#444', margin: '0 4px' }} />
-
-            <Tooltip title="Send Fill Colors to Palette" {...tooltipProps}>
-              <span>
-                <IconButton disabled={busy} onClick={() => pickColors('fill')} size="small" sx={{ color: busy ? '#555' : '#e2a14a' }}>
-                  <FormatColorFillIcon fontSize="small" />
+              <Tooltip title={centerAnchor ? "Center anchor point in layer" : "Default anchor point"} {...tooltipProps}>
+                <IconButton onClick={() => setCenterAnchor(!centerAnchor)} size="small" sx={{ width: 30, height: 30, color: centerAnchor ? '#4a90e2' : '#888' }}>
+                  {centerAnchor ? <FilterCenterFocusIcon fontSize="small" /> : <CropFreeIcon fontSize="small" />}
                 </IconButton>
-              </span>
-            </Tooltip>
+              </Tooltip>
 
-            <Tooltip title="Send Stroke Colors to Palette" {...tooltipProps}>
-              <span>
-                <IconButton disabled={busy} onClick={() => pickColors('stroke')} size="small" sx={{ color: busy ? '#555' : '#e2a14a' }}>
-                  <BorderColorIcon fontSize="small" />
+              {/* Diagnostics aligned to right */}
+              <Tooltip title="Toggle Diagnostics" {...tooltipProps}>
+                <IconButton onClick={() => setShowLogs(!showLogs)} size="small" sx={{ width: 30, height: 30, color: showLogs ? '#fff' : '#888', marginLeft: 'auto' }}>
+                  <BugReportIcon fontSize="small" />
                 </IconButton>
-              </span>
-            </Tooltip>
+              </Tooltip>
+            </div>
 
-            <Tooltip title="Send Both (Fill + Stroke) to Palette" {...tooltipProps}>
-              <span>
-                <IconButton disabled={busy} onClick={() => pickColors('both')} size="small" sx={{ color: busy ? '#555' : '#e2a14a' }}>
-                  <PaletteIcon fontSize="small" />
-                </IconButton>
-              </span>
-            </Tooltip>
+            {/* Row 2: Color pickers */}
+            <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+              <Tooltip title="Send Fill Colors to Palette" {...tooltipProps}>
+                <span>
+                  <IconButton disabled={busy} onClick={() => pickColors('fill')} size="small" sx={{ width: 30, height: 30, color: busy ? '#555' : '#e2a14a' }}>
+                    <FormatColorFillIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
 
-            {/* Diagnostics aligned to right */}
-            <Tooltip title="Toggle Diagnostics" {...tooltipProps}>
-              <IconButton onClick={() => setShowLogs(!showLogs)} size="small" sx={{ color: showLogs ? '#fff' : '#888', marginLeft: 'auto' }}>
-                <BugReportIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
+              <Tooltip title="Send Stroke Colors to Palette" {...tooltipProps}>
+                <span>
+                  <IconButton disabled={busy} onClick={() => pickColors('stroke')} size="small" sx={{ width: 30, height: 30, color: busy ? '#555' : '#e2a14a' }}>
+                    <BorderColorIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+
+              <Tooltip title="Send Both (Fill + Stroke) to Palette" {...tooltipProps}>
+                <span>
+                  <IconButton disabled={busy} onClick={() => pickColors('both')} size="small" sx={{ width: 30, height: 30, color: busy ? '#555' : '#e2a14a' }}>
+                    <PaletteIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+            </div>
           </div>
         );
       })()}
