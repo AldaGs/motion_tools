@@ -139,6 +139,15 @@ function mtagSwitchBeam(targetLogical, scriptPath, payloadJson) {
         var bt = new BridgeTalk();
         bt.target = spec;
         bt.body = body;
+        // If the target throws before it can write its own result file (app not
+        // scriptable, syntax error in the body, etc.), surface it to the poller
+        // by writing an error result here. Runs asynchronously in THIS app after
+        // mtagSwitchBeam has already returned — the panel's poll picks it up.
+        bt.onError = function (errMsg) {
+            var m = "BridgeTalk error";
+            try { m = errMsg.body || String(errMsg); } catch (e) { m = String(errMsg); }
+            try { _mtagWriteFile(resultPath, _mtagErr("target-side failure: " + m)); } catch (e2) {}
+        };
         bt.send();
 
         return _mtagOk({
@@ -187,6 +196,87 @@ function mtagSwitchReadBeamResult() {
     }
 }
 
+// Fire a BridgeTalk body at a target app, clearing the shared result file first
+// so the panel's poll can't read a stale one. Returns the resolved specifier or
+// null when the app isn't found. Shared by the query/set folder round-trips.
+function _mtagBeamCall(targetAppName, body, resultPath) {
+    var spec = BridgeTalk.getSpecifier(targetAppName);
+    if (!spec) return null;
+    var rf = new File(resultPath);
+    if (rf.exists) rf.remove();
+    var bt = new BridgeTalk();
+    bt.target = spec;
+    bt.body = body;
+    bt.onError = function (errMsg) {
+        var m = "BridgeTalk error";
+        try { m = errMsg.body || String(errMsg); } catch (e) { m = String(errMsg); }
+        try { _mtagWriteFile(resultPath, _mtagErr("target-side failure: " + m)); } catch (e2) {}
+    };
+    bt.send();
+    return spec;
+}
+
+// Sender (AI/PS): ask AE to report its per-project image-folder status. Result
+// (via the shared result file, polled with mtagSwitchReadBeamResult) is
+// { imageDirSet, imageDir, projectSaved, aepDir }.
+function mtagSwitchQueryAeImageDir(scriptPath) {
+    try {
+        if (typeof BridgeTalk === "undefined") return _mtagErr("BridgeTalk unavailable.");
+        var resultPath = _mtagTempPath(_MTAG_RESULT_FILE);
+        var body = "$.evalFile(" + _mtagQuote(scriptPath) + ");" +
+            "mtagSwitchReportImageDir(" + _mtagQuote(resultPath) + ");";
+        var spec = _mtagBeamCall("aftereffects", body, resultPath);
+        if (!spec) return _mtagErr("After Effects not found.");
+        return _mtagOk({ sent: true, resultFile: resultPath });
+    } catch (e) {
+        return _mtagErr(e.toString());
+    }
+}
+
+// Sender (AI/PS): tell AE to store `dir` as the project's image folder (XMP).
+function mtagSwitchSetAeImageDir(scriptPath, dir) {
+    try {
+        if (typeof BridgeTalk === "undefined") return _mtagErr("BridgeTalk unavailable.");
+        var resultPath = _mtagTempPath(_MTAG_RESULT_FILE);
+        var body = "$.evalFile(" + _mtagQuote(scriptPath) + ");" +
+            "mtagSwitchApplyImageDir(" + _mtagQuote(dir) + "," + _mtagQuote(resultPath) + ");";
+        var spec = _mtagBeamCall("aftereffects", body, resultPath);
+        if (!spec) return _mtagErr("After Effects not found.");
+        return _mtagOk({ sent: true, resultFile: resultPath });
+    } catch (e) {
+        return _mtagErr(e.toString());
+    }
+}
+
+// Receiver (runs in AE): report image-folder status to the result file.
+function mtagSwitchReportImageDir(resultPath) {
+    var res;
+    try {
+        var info = { imageDirSet: false, imageDir: null, projectSaved: false, aepDir: null };
+        var s = {};
+        try { s = _mtagReadProjectSettings(); } catch (e) {}
+        if (s && s.imageExportDir) { info.imageDirSet = true; info.imageDir = s.imageExportDir; }
+        if (app.project && app.project.file) {
+            info.projectSaved = true;
+            info.aepDir = app.project.file.parent.fsName.replace(/\\/g, "/");
+        }
+        res = _mtagOk(info);
+    } catch (e) {
+        res = _mtagErr(e.toString());
+    }
+    try { _mtagWriteFile(resultPath, res); } catch (e2) {}
+    return res;
+}
+
+// Receiver (runs in AE): persist the chosen image folder into the project XMP.
+function mtagSwitchApplyImageDir(dir, resultPath) {
+    var res;
+    try { res = mtagSetProjectSetting("imageExportDir", dir); }
+    catch (e) { res = _mtagErr(e.toString()); }
+    try { _mtagWriteFile(resultPath, res); } catch (e2) {}
+    return res;
+}
+
 // ---------------- shared color / gradient helpers (AI side) ----------------
 
 // Convert any AI color object to a straight [r,g,b] in 0..1. Alpha is carried
@@ -204,8 +294,22 @@ function _mtagRgbFromAiColor(c) {
         var v = 1 - c.gray / 100;
         return [v, v, v];
     } else if (c.typename === "SpotColor") {
-        // Resolve the spot's underlying process color.
-        try { return _mtagRgbFromAiColor(c.spot.color); } catch (e) { return [0, 0, 0]; }
+        // Resolve the spot's underlying process color, then apply the tint. A
+        // spot tint blends from paper white (0%) to the full color (100%), so a
+        // 40% spot must NOT come through at full strength.
+        try {
+            var base = _mtagRgbFromAiColor(c.spot.color);
+            var t = (c.tint != null ? c.tint : 100) / 100;
+            return [
+                1 - (1 - base[0]) * t,
+                1 - (1 - base[1]) * t,
+                1 - (1 - base[2]) * t
+            ];
+        } catch (e) { return [0, 0, 0]; }
+    } else if (c.typename === "PatternColor") {
+        // Patterns can't be represented in an AE shape fill. Use a neutral gray
+        // placeholder (visible, unlike the old black) — the export notes it.
+        return [0.5, 0.5, 0.5];
     }
     return [0, 0, 0];
 }
@@ -297,6 +401,37 @@ function _mtagBlend(v) {
     return "normal";
 }
 
+// Extract an embedded raster (or any single item) to a PNG on disk by
+// duplicating it into a temp document sized to its bounds and exporting. Used
+// when a RasterItem is embedded (no linked source file) so AE has something to
+// import. Best-effort — callers wrap in try/catch and warn on failure.
+function _mtagExportItemToPng(item, outPath) {
+    var gb = item.geometricBounds; // [left, top, right, bottom], y up
+    var w = Math.abs(gb[2] - gb[0]);
+    var h = Math.abs(gb[1] - gb[3]);
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    var tempDoc = app.documents.add(DocumentColorSpace.RGB, w, h);
+    try {
+        var dup = item.duplicate(tempDoc.layers[0], ElementPlacement.PLACEATEND);
+        // Rather than repositioning the item (AI's `position` coordinate space is
+        // error-prone), fit the temp artboard exactly to the duplicated item's
+        // geometric bounds and clip to it — captures just the item wherever it
+        // landed. Matches the placement bbox (also from geometricBounds).
+        var db;
+        try { db = dup.geometricBounds; } catch (eB) { db = gb; }
+        try { tempDoc.artboards[0].artboardRect = db; } catch (eR) {}
+        var opts = new ExportOptionsPNG24();
+        opts.artBoardClipping = true;
+        opts.transparency = true;
+        opts.horizontalScale = 100;
+        opts.verticalScale = 100;
+        tempDoc.exportFile(new File(outPath), ExportType.PNG24, opts);
+    } finally {
+        try { tempDoc.close(SaveOptions.DONOTSAVECHANGES); } catch (e) {}
+    }
+}
+
 // ---------------- Illustrator export ----------------
 // Collects the selected vector paths, converts geometry to AE-compatible
 // tangents, and reads each path's fill + stroke appearance (solid or gradient),
@@ -317,18 +452,42 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
             return _mtagErr("Nothing selected.");
         }
 
+        // Each entry carries the item plus an `inheritedName` — the closest
+        // named ancestor group. Selecting a named group in AI and recursing to
+        // its unnamed <Path> children would otherwise lose the group's name, so
+        // we thread it down as a naming fallback.
         var itemsToProcess = [];
-        function collect(item) {
-            if (item.typename === "PathItem" || item.typename === "TextFrame") {
-                itemsToProcess.push(item);
-            } else if (item.typename === "CompoundPathItem") {
-                itemsToProcess.push(item);
+        var skipped = [];   // typenames/names we can't handle — reported, not dropped silently
+        function collect(item, inheritedName) {
+            if (item.typename === "PathItem" || item.typename === "TextFrame" ||
+                item.typename === "CompoundPathItem" ||
+                item.typename === "PlacedItem" || item.typename === "RasterItem") {
+                itemsToProcess.push({ item: item, inheritedName: inheritedName });
             } else if (item.typename === "GroupItem") {
-                for (var j = 0; j < item.pageItems.length; j++) collect(item.pageItems[j]);
+                var gName = (item.name && item.name.length) ? item.name : inheritedName;
+                for (var j = 0; j < item.pageItems.length; j++) collect(item.pageItems[j], gName);
+            } else {
+                var label = item.typename;
+                try { if (item.name && item.name.length) label += " '" + item.name + "'"; } catch (eN) {}
+                skipped.push(label);
             }
         }
-        for (var s = 0; s < sel.length; s++) collect(sel[s]);
-        if (itemsToProcess.length === 0) return _mtagErr("Selection has no supported items.");
+        for (var s = 0; s < sel.length; s++) collect(sel[s], "");
+
+        // Pattern fills/strokes come through as a flat gray placeholder (see
+        // _mtagRgbFromAiColor); note it so the downgrade isn't silent.
+        function noteIfPattern(colObj, what) {
+            try {
+                if (colObj && colObj.typename === "PatternColor") {
+                    skipped.push(what + " uses a pattern → flat gray placeholder");
+                }
+            } catch (eP) {}
+        }
+
+        if (itemsToProcess.length === 0) {
+            return _mtagErr("No supported items in selection." +
+                (skipped.length ? " Skipped: " + skipped.join(", ") : ""));
+        }
 
         var ab = doc.artboards[doc.artboards.getActiveArtboardIndex()];
         var abRect = ab.artboardRect;
@@ -343,8 +502,10 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
         var outItems = [];
 
         for (var i = 0; i < itemsToProcess.length; i++) {
-            var item = itemsToProcess[i];
-            
+            var entry = itemsToProcess[i];
+            var item = entry.item;
+            var inheritedName = entry.inheritedName;
+
             var objOpacity = (item.opacity != null ? item.opacity / 100 : 1);
             var blend = "normal";
             try { blend = _mtagBlend(item.blendingMode); } catch (eB) { blend = "normal"; }
@@ -355,6 +516,39 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
             var bbox = { x: Math.min(bl[0], br[0]), y: Math.min(bl[1], br[1]),
                          w: Math.abs(br[0]-bl[0]), h: Math.abs(br[1]-bl[1]) };
 
+            if (item.typename === "PlacedItem" || item.typename === "RasterItem") {
+                var imgName = (item.name && item.name.length) ? item.name : (inheritedName || "Image");
+                var srcPath = null;
+                var linked = false;
+                // Prefer a linked source file when present (PlacedItem, or a
+                // RasterItem that still points at its origin file).
+                try {
+                    if (item.file && item.file.exists) { srcPath = item.file.fsName; linked = true; }
+                } catch (eFile) {}
+                if (!srcPath) {
+                    // Embedded / missing link → extract to a temp PNG for AE.
+                    try {
+                        var tmp = _mtagTempPath("mtag_img_" + i + "_" + (new Date().getTime()) + ".png");
+                        _mtagExportItemToPng(item, tmp);
+                        srcPath = tmp;
+                        linked = false;
+                    } catch (eExtract) {
+                        skipped.push("image '" + imgName + "' (extract failed: " + eExtract.toString() + ")");
+                        continue;
+                    }
+                }
+                outItems.push({
+                    kind: "image",
+                    name: imgName,
+                    bbox: bbox,
+                    sourcePath: String(srcPath).replace(/\\/g, "/"),
+                    linked: linked,
+                    opacity: objOpacity,
+                    blendMode: blend
+                });
+                continue;
+            }
+
             if (item.typename === "TextFrame") {
                 var contents = item.contents;
                 var font = "ArialMT";
@@ -362,6 +556,11 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                 var just = "left";
                 var fills = [];
                 var strokes = [];
+                var aiAnchor = null;
+                
+                try {
+                    if (item.anchor) aiAnchor = conv(item.anchor);
+                } catch (e) {}
                 
                 try {
                     var range = item.textRange;
@@ -369,12 +568,18 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                         var charAttrs = range.characterAttributes;
                         if (charAttrs.textFont) font = charAttrs.textFont.name;
                         if (charAttrs.size) fontSize = charAttrs.size * PT_TO_PX;
-                        if (charAttrs.fillColor) fills.push(_mtagPaintFromAiColor(charAttrs.fillColor, 1, conv));
-                        if (charAttrs.strokeColor) strokes.push({
-                            paint: _mtagPaintFromAiColor(charAttrs.strokeColor, 1, conv),
-                            width: (charAttrs.strokeWeight || 1) * PT_TO_PX,
-                            cap: "butt", join: "miter", miterLimit: 4
-                        });
+                        if (charAttrs.fillColor && charAttrs.fillColor.typename !== "NoColor") {
+                            noteIfPattern(charAttrs.fillColor, "'" + (item.name || "text") + "' fill");
+                            fills.push(_mtagPaintFromAiColor(charAttrs.fillColor, 1, conv));
+                        }
+                        if (charAttrs.strokeColor && charAttrs.strokeColor.typename !== "NoColor") {
+                            noteIfPattern(charAttrs.strokeColor, "'" + (item.name || "text") + "' stroke");
+                            strokes.push({
+                                paint: _mtagPaintFromAiColor(charAttrs.strokeColor, 1, conv),
+                                width: (charAttrs.strokeWeight || 1) * PT_TO_PX,
+                                cap: "butt", join: "miter", miterLimit: 4
+                            });
+                        }
                         
                         var pAttrs = range.paragraphAttributes;
                         if (pAttrs && pAttrs.justification) {
@@ -385,14 +590,21 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                     }
                 } catch(e) {}
                 
+                // Name the AE text layer after its content (matches AI's own
+                // Layers-panel behaviour of showing the string). Collapse
+                // newlines/whitespace so the layer name stays single-line.
+                var textName = contents ? String(contents).replace(/[\r\n\t]+/g, " ").replace(/^\s+|\s+$/g, "") : "";
+                if (!textName.length) textName = (item.name && item.name.length) ? item.name : "Text";
+
                 outItems.push({
                     kind: "text",
-                    name: (item.name && item.name.length) ? item.name : "Text",
+                    name: textName,
                     text: contents,
                     font: font,
                     fontSize: fontSize,
                     justification: just,
                     bbox: bbox,
+                    aiAnchor: aiAnchor,
                     opacity: objOpacity,
                     blendMode: blend,
                     appearance: { fills: fills, strokes: strokes }
@@ -424,10 +636,12 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                 var first = item.typename === "CompoundPathItem" ? item.pathItems[0] : item;
                 var fills = [];
                 if (first.filled && first.fillColor) {
+                    noteIfPattern(first.fillColor, "'" + (item.name || "path") + "' fill");
                     fills.push(_mtagPaintFromAiColor(first.fillColor, 1, conv, bbox));
                 }
                 var strokes = [];
                 if (first.stroked && first.strokeColor) {
+                    noteIfPattern(first.strokeColor, "'" + (item.name || "path") + "' stroke");
                     var dashes = [];
                     try {
                         if (first.strokeDashes && first.strokeDashes.length) {
@@ -448,6 +662,9 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                 }
 
                 var name = item.name;
+                // Fall back to the enclosing named group before guessing from
+                // geometry, so objects inside a named AI group carry that name.
+                if (!name || name.length === 0) name = inheritedName || "";
                 if (!name || name.length === 0) {
                     if (item.typename === "CompoundPathItem") name = "Compound Path";
                     else if (subpaths[0] && subpaths[0].vertices.length === 4 && subpaths[0].closed) {
@@ -459,13 +676,19 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                     }
                 }
                 
+                // AI compound paths rely on winding to punch holes (donuts,
+                // letter counters). The DOM doesn't expose the rule, but
+                // even-odd reproduces holes far more often than nonzero, which
+                // would fill them. Plain paths stay nonzero.
+                var fillRule = (item.typename === "CompoundPathItem") ? "even-odd" : "nonzero";
+
                 outItems.push({
                     kind: "path",
                     name: name,
                     bbox: bbox,
                     opacity: objOpacity,
                     blendMode: blend,
-                    geometry: { subpaths: subpaths, fillRule: "nonzero" },
+                    geometry: { subpaths: subpaths, fillRule: fillRule },
                     appearance: { fills: fills, strokes: strokes }
                 });
             }
@@ -486,6 +709,7 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                 grouped: !!grouped,
                 centerAnchor: !!centerAnchor
             },
+            skipped: skipped,
             items: outItems
         });
     } catch (e) {
@@ -524,7 +748,18 @@ function mtagAiExtractColors(mode) {
                 var v = Math.round((1 - c.gray / 100) * 255);
                 rgb = [v, v, v];
             } else if (c.typename === "SpotColor") {
-                try { return hexFromAiColor(c.spot.color); } catch(e) { return null; }
+                // Resolve the spot's base color, then apply the tint (blend from
+                // white toward the full color) so tinted spots aren't extracted
+                // at full strength.
+                try {
+                    var baseHex = hexFromAiColor(c.spot.color);
+                    if (!baseHex) return null;
+                    var t = (c.tint != null ? c.tint : 100) / 100;
+                    var br = parseInt(baseHex.substr(0, 2), 16);
+                    var bg = parseInt(baseHex.substr(2, 2), 16);
+                    var bb = parseInt(baseHex.substr(4, 2), 16);
+                    rgb = [255 - (255 - br) * t, 255 - (255 - bg) * t, 255 - (255 - bb) * t];
+                } catch(e) { return null; }
             } else if (c.typename === "GradientColor") {
                 // Return first gradient stop as a representative solid
                 try {
@@ -600,6 +835,264 @@ function mtagAiExtractColors(mode) {
     }
 }
 
+// ---------------- Photoshop export (PS → AE) ----------------
+// Photoshop is raster-native, so a layer maps cleanly onto AE footage: export
+// each SELECTED PS layer to its own trimmed PNG and emit an ImageItem the AE
+// side already knows how to import (reuses the AI image path). PS doc space is
+// top-left origin, y-down — identical to AE comp space — so bbox = layer.bounds
+// with no artboard offset. All PS-specific globals (ActionReference,
+// executeActionGet, charIDToTypeID, BlendMode, PNGSaveOptions…) are referenced
+// only inside these functions, so this file still loads in AI/AE.
+
+function _psPx(u) {
+    // layer.bounds returns UnitValue objects; normalise to a plain px number.
+    try { return (u && u.as) ? u.as("px") : parseFloat(u); } catch (e) { return parseFloat(u); }
+}
+
+// Recursively flatten every layer/layerSet so we can look one up by id.
+function _psAllLayers(container, acc) {
+    for (var i = 0; i < container.layers.length; i++) {
+        var l = container.layers[i];
+        acc.push(l);
+        if (l.typename === "LayerSet") _psAllLayers(l, acc);
+    }
+    return acc;
+}
+function _psLayerById(id) {
+    var all = _psAllLayers(app.activeDocument, []);
+    for (var i = 0; i < all.length; i++) {
+        try { if (all[i].id === id) return all[i]; } catch (e) {}
+    }
+    return null;
+}
+
+// The DOM exposes only ONE active layer; multi-selection lives in the Action
+// Manager. Read the `targetLayers` list, map each selection index to a real
+// layer id (accounting for the Background-layer index offset), and fall back to
+// the single active layer when the list is absent.
+function _psSelectedLayerIds() {
+    var ids = [];
+    try {
+        var sidTargetLayers = stringIDToTypeID("targetLayers");
+        var ref = new ActionReference();
+        ref.putEnumerated(charIDToTypeID("Dcmn"), charIDToTypeID("Ordn"), charIDToTypeID("Trgt"));
+        var desc = executeActionGet(ref);
+        if (desc.hasKey(sidTargetLayers)) {
+            var hasBg = false;
+            try {
+                var layers = app.activeDocument.layers;
+                hasBg = layers[layers.length - 1].isBackgroundLayer;
+            } catch (e) {}
+            var list = desc.getList(sidTargetLayers);
+            for (var i = 0; i < list.count; i++) {
+                // selIndex is 0-based excluding a Background layer; the layer
+                // reference index is 1-based, so add 1 when there's no Background.
+                var selIndex = list.getReference(i).getIndex();
+                var lref = new ActionReference();
+                lref.putIndex(charIDToTypeID("Lyr "), selIndex + (hasBg ? 0 : 1));
+                var ldesc = executeActionGet(lref);
+                ids.push(ldesc.getInteger(stringIDToTypeID("layerID")));
+            }
+        }
+    } catch (eAM) {
+        // Action Manager read failed (older PS, odd doc state) — fall through
+        // to the single active layer below.
+        ids = [];
+    }
+    // Fallback: no multi-selection resolved → use the active layer.
+    if (ids.length === 0) {
+        try { ids.push(app.activeDocument.activeLayer.id); } catch (e2) {}
+    }
+    return ids;
+}
+
+// Map a PS BlendMode enum to the schema's blend-mode string.
+function _psBlend(bm) {
+    var s = String(bm);
+    var map = [
+        [BlendMode.MULTIPLY, "multiply"], [BlendMode.SCREEN, "screen"],
+        [BlendMode.OVERLAY, "overlay"], [BlendMode.DARKEN, "darken"],
+        [BlendMode.LIGHTEN, "lighten"], [BlendMode.COLORDODGE, "colorDodge"],
+        [BlendMode.COLORBURN, "colorBurn"], [BlendMode.HARDLIGHT, "hardLight"],
+        [BlendMode.SOFTLIGHT, "softLight"], [BlendMode.DIFFERENCE, "difference"],
+        [BlendMode.EXCLUSION, "exclusion"], [BlendMode.HUE, "hue"],
+        [BlendMode.SATURATION, "saturation"], [BlendMode.COLOR, "color"],
+        [BlendMode.LUMINOSITY, "luminosity"]
+    ];
+    for (var i = 0; i < map.length; i++) {
+        if (s === String(map[i][0])) return map[i][1];
+    }
+    return "normal";
+}
+
+// Build an editable TextItem from a PS text layer, reusing the AE text-import
+// path (same schema as AI text). Returns null when the layer can't be sent as
+// editable text (warp present, or any read failure) so the caller rasterizes
+// it to PNG instead. PS text has one dominant style per layer via the DOM;
+// mixed per-character runs flatten to that style.
+function _psTextItem(layer, left, top, w, h, opacity, blend) {
+    try {
+        var ti = layer.textItem;
+        // Warp doesn't map to AE text — signal the caller to rasterize.
+        try { if (ti.warpStyle && String(ti.warpStyle) !== String(WarpStyle.NONE)) return null; } catch (eW) {}
+
+        var contents = "";
+        try { contents = ti.contents; } catch (eC) {}
+
+        var font = "ArialMT";
+        try { if (ti.font) font = ti.font; } catch (eF) {}
+
+        // ti.size is typographic points; rendered px scales with doc resolution.
+        var szPt = 12;
+        try { var sz = ti.size; szPt = (sz && sz.as) ? sz.as("pt") : parseFloat(sz); } catch (eS) {}
+        var res = 72;
+        try { res = app.activeDocument.resolution; } catch (eR) {}
+        var fontSizePx = szPt * res / 72;
+
+        var just = "left";
+        try {
+            var j = String(ti.justification);
+            if (j.indexOf("CENTER") !== -1) just = "center";
+            else if (j.indexOf("RIGHT") !== -1) just = "right";
+        } catch (eJ) {}
+
+        var fills = [];
+        try {
+            var c = ti.color;
+            if (c && c.rgb) {
+                fills.push({ kind: "solid", rgba: [c.rgb.red / 255, c.rgb.green / 255, c.rgb.blue / 255, 1] });
+            }
+        } catch (eCol) {}
+
+        // ti.position is the text origin (baseline start for point text) in px,
+        // top-left/y-down — same space as AE. Feed it as aiAnchor so AE places
+        // the layer there directly.
+        var anchor = null;
+        try { var pos = ti.position; anchor = [_psPx(pos[0]), _psPx(pos[1])]; } catch (eP) {}
+
+        var name = (layer.name && layer.name.length)
+            ? layer.name
+            : (contents ? String(contents).replace(/[\r\n\t]+/g, " ").replace(/^\s+|\s+$/g, "") : "Text");
+
+        return {
+            kind: "text",
+            name: name,
+            text: contents,
+            font: font,
+            fontSize: fontSizePx,
+            justification: just,
+            bbox: { x: left, y: top, w: w, h: h },
+            aiAnchor: anchor,
+            opacity: opacity,
+            blendMode: blend,
+            appearance: { fills: fills, strokes: [] }
+        };
+    } catch (e) {
+        return null;
+    }
+}
+
+// Duplicate one layer into a fresh transparent doc, trim to its pixels, save a
+// PNG. The trimmed PNG matches layer.bounds, so AE can place it by bbox.
+function _psExportLayerToPng(layer, outPath) {
+    var srcDoc = app.activeDocument;
+    var newDoc = app.documents.add(
+        srcDoc.width, srcDoc.height, srcDoc.resolution,
+        "__mtag_tmp", NewDocumentMode.RGB, DocumentFill.TRANSPARENT
+    );
+    try {
+        app.activeDocument = srcDoc;
+        layer.duplicate(newDoc, ElementPlacement.PLACEATBEGINNING);
+        app.activeDocument = newDoc;
+        try { newDoc.trim(TrimType.TRANSPARENT, true, true, true, true); } catch (eTrim) {}
+        var opts = new PNGSaveOptions();
+        opts.compression = 6;
+        opts.interlaced = false;
+        newDoc.saveAs(new File(outPath), opts, true, Extension.LOWERCASE);
+    } finally {
+        try { newDoc.close(SaveOptions.DONOTSAVECHANGES); } catch (eClose) {}
+        app.activeDocument = srcDoc;
+    }
+}
+
+// Panel entry point (PS side). Exports each selected layer to a PNG and returns
+// an ArtworkPayload of ImageItems for AE. grouped/centerAnchor are carried for
+// AE-side placement; each layer is always its own footage layer.
+function mtagSwitchPsExport(grouped, centerAnchor) {
+    try {
+        if (!app.documents || app.documents.length === 0) return _mtagErr("No open document.");
+        var doc = app.activeDocument;
+        var ids = _psSelectedLayerIds();
+        if (!ids || ids.length === 0) return _mtagErr("No layers selected.");
+
+        var outItems = [];
+        var skipped = [];
+        for (var i = 0; i < ids.length; i++) {
+            var layer = _psLayerById(ids[i]);
+            if (!layer) continue;
+
+            var b;
+            try { b = layer.bounds; } catch (eB) { b = null; }
+            if (!b) { skipped.push("layer (no bounds)"); continue; }
+            var left = _psPx(b[0]), top = _psPx(b[1]), right = _psPx(b[2]), bottom = _psPx(b[3]);
+            var w = right - left, h = bottom - top;
+            if (!(w >= 1 && h >= 1)) { skipped.push("'" + layer.name + "' (empty/no pixels)"); continue; }
+
+            var op = 1;
+            try { op = layer.opacity / 100; } catch (eO) {}
+            var blend = "normal";
+            try { blend = _psBlend(layer.blendMode); } catch (eBl) {}
+
+            // Editable text: a text layer (with no warp) → AE text layer. Any
+            // failure or a warp falls through to the raster path below.
+            var isText = false;
+            try { isText = (layer.kind === LayerKind.TEXT); } catch (eK) {}
+            if (isText) {
+                var textItem = _psTextItem(layer, left, top, w, h, op, blend);
+                if (textItem) { outItems.push(textItem); continue; }
+                // else: warp/rich text → rasterize, noting the downgrade.
+                skipped.push("'" + layer.name + "' (text warped/unsupported → sent as image)");
+            }
+
+            var outPath = _mtagTempPath("mtag_ps_" + i + "_" + (new Date().getTime()) + ".png");
+            try {
+                _psExportLayerToPng(layer, outPath);
+            } catch (eExp) {
+                skipped.push("'" + layer.name + "' (export failed: " + eExp.toString() + ")");
+                continue;
+            }
+
+            outItems.push({
+                kind: "image",
+                name: layer.name || ("Layer " + (i + 1)),
+                bbox: { x: left, y: top, w: w, h: h },
+                sourcePath: String(outPath).replace(/\\/g, "/"),
+                linked: false,
+                opacity: op,
+                blendMode: blend
+            });
+        }
+
+        if (outItems.length === 0) {
+            return _mtagErr("Nothing exportable in selection." +
+                (skipped.length ? " Skipped: " + skipped.join(", ") : ""));
+        }
+
+        return _mtagOk({
+            origin: {
+                ref: "comp-center",
+                sourceX: 0, sourceY: 0, sourceUnit: "px",
+                artboardWidth: _psPx(doc.width), artboardHeight: _psPx(doc.height)
+            },
+            options: { grouped: !!grouped, centerAnchor: !!centerAnchor },
+            skipped: skipped,
+            items: outItems
+        });
+    } catch (e) {
+        return _mtagErr(e.toString());
+    }
+}
+
 // ---------------- shared helpers (AE side) ----------------
 
 // Map the schema's blend-mode string to AE's BlendingMode enum for layers.
@@ -628,15 +1121,53 @@ function _mtagAeBlend(str) {
 function _mtagAeCap(str) { return str === "round" ? 2 : str === "square" ? 3 : 1; }
 function _mtagAeJoin(str) { return str === "round" ? 2 : str === "bevel" ? 3 : 1; }
 
+// True if any fill or stroke of the item is a gradient. Used to isolate such
+// items onto their own layer in grouped mode, because the Ramp-effect gradient
+// fallback is layer-wide and would tint sibling shapes on a shared layer.
+function _mtagItemHasGradient(item) {
+    var a = item.appearance;
+    if (!a) return false;
+    var i;
+    if (a.fills) {
+        for (i = 0; i < a.fills.length; i++) {
+            if (a.fills[i] && a.fills[i].kind === "gradient") return true;
+        }
+    }
+    if (a.strokes) {
+        for (i = 0; i < a.strokes.length; i++) {
+            if (a.strokes[i] && a.strokes[i].paint && a.strokes[i].paint.kind === "gradient") return true;
+        }
+    }
+    return false;
+}
+
+// True if the item has a non-normal blend mode. AE blend modes live on the
+// LAYER, not on a shape group, so a grouped item's blend mode would be lost if
+// it shared a layer. Such items are isolated onto their own layer (like
+// gradients) so the blend mode can actually be applied.
+function _mtagItemHasBlend(item) {
+    return !!(item.blendMode && item.blendMode !== "normal");
+}
+
+// An item must own its layer (even in grouped mode) if a layer-level property
+// can't be represented on a shared shape layer: gradient Ramp fallback or a
+// blend mode.
+function _mtagItemNeedsOwnLayer(item) {
+    return _mtagItemHasGradient(item) || _mtagItemHasBlend(item);
+}
+
 // Build the flat value array AE's "Gradient Colors" property expects:
 // color stops first ([pos, r, g, b] each), then alpha stops ([pos, alpha]
 // each), with equal counts. Stop midpoints are NOT representable here (AE fixes
 // them at 0.5), so they're dropped — logged by the caller as a downgrade.
 function _mtagGradValue(stops) {
+    // AE expects stops in ascending position order; AI usually provides them
+    // sorted but doesn't guarantee it. Copy + sort defensively.
+    var sorted = stops.slice().sort(function (a, b) { return a.offset - b.offset; });
     var colorArr = [];
     var alphaArr = [];
-    for (var i = 0; i < stops.length; i++) {
-        var s = stops[i];
+    for (var i = 0; i < sorted.length; i++) {
+        var s = sorted[i];
         var pos = s.offset;
         colorArr.push(pos, s.rgba[0], s.rgba[1], s.rgba[2]);
         alphaArr.push(pos, (s.rgba[3] == null ? 1 : s.rgba[3]));
@@ -765,6 +1296,139 @@ function _mtagAddStroke(groupContents, stroke, shapeLayer) {
     return warnings;
 }
 
+// ---------------- Per-project settings (AE side) ----------------
+// AE persists a project's XMP metadata packet (RDF/XML) INSIDE the .aep via
+// app.project.xmpPacket. We stash MTAG's per-project settings there as a JSON
+// blob under our own namespace, so e.g. the image export folder travels with
+// the project file and differs per project. Requires the AdobeXMPScript
+// ExternalObject (bundled with AE).
+
+var _MTAG_XMP_NS = "http://motiontoolbar.com/xmp/1.0/";
+var _MTAG_XMP_PREFIX = "mtag:";
+var _MTAG_XMP_PROP = "mtagSettings";
+
+function _mtagLoadXmpLib() {
+    if (typeof ExternalObject === "undefined") return false;
+    try {
+        if (ExternalObject.AdobeXMPScript == undefined) {
+            ExternalObject.AdobeXMPScript = new ExternalObject("lib:AdobeXMPScript");
+        }
+        XMPMeta.registerNamespace(_MTAG_XMP_NS, _MTAG_XMP_PREFIX);
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+// Returns the parsed settings object stored on the active project ({} if none).
+function _mtagReadProjectSettings() {
+    if (!app.project) return {};
+    if (!_mtagLoadXmpLib()) return {};
+    var packet = app.project.xmpPacket || "";
+    if (!packet) return {};
+    var xmp = new XMPMeta(packet);
+    if (!xmp.doesPropertyExist(_MTAG_XMP_NS, _MTAG_XMP_PROP)) return {};
+    var val = xmp.getProperty(_MTAG_XMP_NS, _MTAG_XMP_PROP);
+    var str = val ? val.toString() : "";
+    if (!str) return {};
+    try { return JSON.parse(str) || {}; } catch (e) { return {}; }
+}
+
+// Panel entry point: read all per-project settings.
+function mtagGetProjectSettings() {
+    try {
+        if (!app.project) return _mtagErr("No project open.");
+        if (typeof ExternalObject === "undefined") return _mtagErr("XMP scripting unavailable in this host.");
+        return _mtagOk(_mtagReadProjectSettings());
+    } catch (e) {
+        return _mtagErr(e.toString());
+    }
+}
+
+// Panel entry point: set one key. Writing marks the project dirty; the value
+// only reaches disk when the user saves the .aep. Returns the merged settings.
+function mtagSetProjectSetting(key, value) {
+    try {
+        if (!app.project) return _mtagErr("No project open.");
+        if (!_mtagLoadXmpLib()) return _mtagErr("XMP scripting unavailable in this host.");
+        var packet = app.project.xmpPacket || "";
+        var xmp = packet ? new XMPMeta(packet) : new XMPMeta();
+        var current = {};
+        if (xmp.doesPropertyExist(_MTAG_XMP_NS, _MTAG_XMP_PROP)) {
+            try { current = JSON.parse(xmp.getProperty(_MTAG_XMP_NS, _MTAG_XMP_PROP).toString()) || {}; }
+            catch (ep) { current = {}; }
+        }
+        current[key] = value;
+        xmp.setProperty(_MTAG_XMP_NS, _MTAG_XMP_PROP, JSON.stringify(current));
+        app.project.xmpPacket = xmp.serialize();
+        return _mtagOk(current);
+    } catch (e) {
+        return _mtagErr(e.toString());
+    }
+}
+
+// Returns the folder containing the saved .aep. Errors when the project has
+// never been saved (no file on disk) so the panel can prompt the user to save.
+function mtagGetProjectDir() {
+    try {
+        if (!app.project) return _mtagErr("No project open.");
+        if (!app.project.file) return _mtagErr("unsaved");
+        return _mtagOk({ dir: app.project.file.parent.fsName.replace(/\\/g, "/") });
+    } catch (e) {
+        return _mtagErr(e.toString());
+    }
+}
+
+// Native folder picker. `defaultPath` (optional) sets the initial location.
+// Returns { path } on selection or { cancelled:true } if dismissed.
+function mtagPickFolder(defaultPath) {
+    try {
+        var start = null;
+        if (defaultPath) {
+            var f = new Folder(defaultPath);
+            if (f.exists) start = f;
+        }
+        var picked = start
+            ? start.selectDlg("Select image export folder")
+            : Folder.selectDialog("Select image export folder");
+        if (!picked) return _mtagOk({ cancelled: true });
+        return _mtagOk({ path: picked.fsName.replace(/\\/g, "/") });
+    } catch (e) {
+        return _mtagErr(e.toString());
+    }
+}
+
+// Resolve the folder that imported images are copied into, in priority order:
+// the project's per-project imageExportDir (XMP), else an "MTAG_Images" folder
+// next to a saved .aep, else the OS temp dir. Always returns an existing Folder.
+function _mtagResolveImageDir() {
+    var dir = null;
+    try {
+        var s = _mtagReadProjectSettings();
+        if (s && s.imageExportDir) dir = s.imageExportDir;
+    } catch (e) {}
+    var f;
+    if (dir) {
+        f = new Folder(dir);
+        if (!f.exists) { try { f.create(); } catch (e2) {} }
+        if (f.exists) return f;
+    }
+    if (app.project.file) {
+        try {
+            f = new Folder(app.project.file.parent.fsName + "/MTAG_Images");
+            if (!f.exists) f.create();
+            if (f.exists) return f;
+        } catch (e3) {}
+    }
+    f = new Folder(Folder.temp.fsName + "/MTAG_Images");
+    if (!f.exists) { try { f.create(); } catch (e4) {} }
+    return f;
+}
+
+function _mtagSameFile(a, b) {
+    try { return a.fsName === b.fsName; } catch (e) { return false; }
+}
+
 // ---------------- After Effects import ----------------
 // Creates a shape layer in the active comp from an ArtworkPayload: one shape
 // group holding all subpaths, with fills and strokes stacked so strokes render
@@ -785,6 +1449,11 @@ function mtagSwitchAeImport(jsonString) {
         app.beginUndoGroup("MTAG Switch: Import");
         
         var groupedShapeLayer = null;
+        // Gradient items in grouped mode get isolated onto their own layers
+        // (see _mtagItemHasGradient). Tracked here so the final alignment block
+        // positions them together with the grouped layer.
+        var isolatedLayers = [];
+        var isolatedNoted = false;
         var totalFills = 0, totalStrokes = 0;
 
         for (var idx = 0; idx < items.length; idx++) {
@@ -812,7 +1481,11 @@ function mtagSwitchAeImport(jsonString) {
                     if (f.kind === "solid") {
                         textDoc.fillColor = [f.rgba[0], f.rgba[1], f.rgba[2]];
                         textDoc.applyFill = true;
+                    } else {
+                        textDoc.applyFill = false;
                     }
+                } else {
+                    textDoc.applyFill = false;
                 }
                 
                 if (strokes.length > 0) {
@@ -821,7 +1494,11 @@ function mtagSwitchAeImport(jsonString) {
                         textDoc.strokeColor = [s.paint.rgba[0], s.paint.rgba[1], s.paint.rgba[2]];
                         textDoc.strokeWidth = s.width || 1;
                         textDoc.applyStroke = true;
+                    } else {
+                        textDoc.applyStroke = false;
                     }
+                } else {
+                    textDoc.applyStroke = false;
                 }
                 
                 textProp.setValue(textDoc);
@@ -834,7 +1511,14 @@ function mtagSwitchAeImport(jsonString) {
                 }
                 
                 var bbox = item.bbox || { x: 0, y: 0, w: 100, h: 100 };
-                textLayer.property("Transform").property("Position").setValue([bbox.x, bbox.y + bbox.h]);
+                if (item.aiAnchor) {
+                    textLayer.property("Transform").property("Position").setValue(item.aiAnchor);
+                } else {
+                    var posX = bbox.x;
+                    if (item.justification === "center") posX = bbox.x + bbox.w / 2;
+                    else if (item.justification === "right") posX = bbox.x + bbox.w;
+                    textLayer.property("Transform").property("Position").setValue([posX, bbox.y + bbox.h]);
+                }
 
                 if (options.centerAnchor) {
                     try {
@@ -845,16 +1529,6 @@ function mtagSwitchAeImport(jsonString) {
                         textLayer.property("Transform").property("Anchor Point").setValue([ax, ay]);
                         textLayer.property("Transform").property("Position").setValue([oldPos[0] + ax, oldPos[1] + ay]);
                     } catch(eText) {}
-                } else {
-                    try {
-                        var rect = textLayer.sourceRectAtTime(comp.time, false);
-                        var currentAnchorX = rect.left;
-                        var currentAnchorY = rect.top + rect.height; // approximate baseline
-                        var anchorOffsetX = comp.width/2 - bbox.x;
-                        var anchorOffsetY = comp.height/2 - (bbox.y + bbox.h);
-                        textLayer.property("Transform").property("Anchor Point").setValue([anchorOffsetX, anchorOffsetY]);
-                        textLayer.property("Transform").property("Position").setValue([comp.width/2, comp.height/2]);
-                    } catch(eText) {}
                 }
                 
             } else if (item.kind === "path") {
@@ -863,9 +1537,30 @@ function mtagSwitchAeImport(jsonString) {
                 var fills = appr.fills || [];
                 var strokes = appr.strokes || [];
                 
+                // Gradient items (layer-wide Ramp fallback) and blend-mode items
+                // (blend lives on the layer) can't safely share the grouped
+                // layer. Isolate them onto their own layer, which is aligned
+                // with the group at the end.
+                var isolated = options.grouped && _mtagItemNeedsOwnLayer(item);
+                var ownLayer = (!options.grouped) || isolated;
+
                 var layerToUse, targetContents;
-                
-                if (options.grouped) {
+                if (ownLayer) {
+                    layerToUse = comp.layers.addShape();
+                    layerToUse.name = item.name || "Shape";
+                    // Neutralise the default transform so path coords map 1:1 to
+                    // comp space; final positioning happens below / at the end.
+                    layerToUse.property("Transform").property("Anchor Point").setValue([0, 0]);
+                    layerToUse.property("Transform").property("Position").setValue([0, 0]);
+                    targetContents = layerToUse.property("Contents");
+                    if (isolated) {
+                        isolatedLayers.push(layerToUse);
+                        if (!isolatedNoted) {
+                            warnings.push("item(s) with a gradient or blend mode placed on their own layer(s) so they don't affect grouped siblings");
+                            isolatedNoted = true;
+                        }
+                    }
+                } else {
                     if (!groupedShapeLayer) {
                         groupedShapeLayer = comp.layers.addShape();
                         groupedShapeLayer.name = "Imported Shapes";
@@ -873,10 +1568,6 @@ function mtagSwitchAeImport(jsonString) {
                         groupedShapeLayer.property("Transform").property("Position").setValue([0, 0]);
                     }
                     layerToUse = groupedShapeLayer;
-                    targetContents = layerToUse.property("Contents");
-                } else {
-                    layerToUse = comp.layers.addShape();
-                    layerToUse.name = item.name || "Shape";
                     targetContents = layerToUse.property("Contents");
                 }
                 
@@ -916,7 +1607,9 @@ function mtagSwitchAeImport(jsonString) {
                     }
                 }
                 
-                if (!options.grouped) {
+                if (ownLayer) {
+                    // Opacity + blend belong to the whole layer when the item
+                    // owns it (separate mode, or an isolated gradient item).
                     if (item.opacity != null && item.opacity < 1) {
                         layerToUse.property("Transform").property("Opacity").setValue(item.opacity * 100);
                     }
@@ -925,27 +1618,89 @@ function mtagSwitchAeImport(jsonString) {
                             warnings.push("blend mode '" + item.blendMode + "' not applied");
                         }
                     }
-                    
-                    var bbox = item.bbox || { x: 0, y: 0, w: 100, h: 100 };
-                    var anchor = [bbox.x + bbox.w / 2, bbox.y + bbox.h / 2];
-                    if (options.centerAnchor) {
-                        layerToUse.property("Transform").property("Anchor Point").setValue(anchor);
-                        layerToUse.property("Transform").property("Position").setValue(anchor);
-                    } else {
-                        layerToUse.property("Transform").property("Anchor Point").setValue([comp.width / 2, comp.height / 2]);
-                        layerToUse.property("Transform").property("Position").setValue([comp.width / 2, comp.height / 2]);
+
+                    if (!options.grouped) {
+                        // Separate mode: position each layer independently now.
+                        var bbox = item.bbox || { x: 0, y: 0, w: 100, h: 100 };
+                        var anchor = [bbox.x + bbox.w / 2, bbox.y + bbox.h / 2];
+                        if (options.centerAnchor) {
+                            layerToUse.property("Transform").property("Anchor Point").setValue(anchor);
+                            layerToUse.property("Transform").property("Position").setValue(anchor);
+                        } else {
+                            layerToUse.property("Transform").property("Anchor Point").setValue([comp.width / 2, comp.height / 2]);
+                            layerToUse.property("Transform").property("Position").setValue([comp.width / 2, comp.height / 2]);
+                        }
                     }
+                    // Isolated-in-grouped: leave transform at [0,0]; the final
+                    // alignment block below positions it with the grouped layer.
                 } else {
                     var groupTransform = group.property("Transform");
                     if (item.opacity != null && item.opacity < 1) {
                         try { groupTransform.property("Opacity").setValue(item.opacity * 100); } catch(e){}
                     }
                 }
+            } else if (item.kind === "image") {
+                // Images always own a footage layer (can't merge into a shape
+                // layer). Copy the source into the project's image folder so the
+                // .aep has a stable asset, then import + place/scale to bbox.
+                var srcFile = new File(item.sourcePath);
+                if (!srcFile.exists) {
+                    warnings.push("image source missing: " + item.sourcePath);
+                } else {
+                    var destDir = _mtagResolveImageDir();
+                    var safeBase = String(item.name || "image").replace(/[^\w\-. ]+/g, "_");
+                    var ext = "";
+                    var dot = srcFile.name.lastIndexOf(".");
+                    if (dot >= 0) ext = srcFile.name.substring(dot);
+                    var destFile = new File(destDir.fsName + "/" + safeBase + ext);
+                    // Avoid clobbering an unrelated file of the same name.
+                    var nDup = 1;
+                    while (destFile.exists && !_mtagSameFile(destFile, srcFile)) {
+                        destFile = new File(destDir.fsName + "/" + safeBase + "_" + nDup + ext);
+                        nDup++;
+                    }
+                    try { if (!destFile.exists) srcFile.copy(destFile.fsName); } catch (eCopy) {}
+                    var useFile = destFile.exists ? destFile : srcFile;
+
+                    var footageItem = null;
+                    try {
+                        var io = new ImportOptions(useFile);
+                        // Layered formats (PSD/AI/PDF) would import as a comp by
+                        // default; force merged footage so we get one placeable
+                        // layer. canImportAs guards formats that don't support it.
+                        try {
+                            if (io.canImportAs(ImportAsType.FOOTAGE)) io.importAs = ImportAsType.FOOTAGE;
+                        } catch (eIA) {}
+                        footageItem = app.project.importFile(io);
+                    } catch (eImp) {
+                        var ext = useFile.name.replace(/^.*\./, "").toUpperCase();
+                        warnings.push("image import failed (" + (item.name || "image") + ", ." + ext + "): " + eImp.toString());
+                    }
+                    if (footageItem) {
+                        var imgLayer = comp.layers.add(footageItem);
+                        imgLayer.name = item.name || "Image";
+                        var ibbox = item.bbox || { x: 0, y: 0, w: footageItem.width, h: footageItem.height };
+                        // Footage anchor defaults to its center; scale to bbox and
+                        // drop the center at the bbox center → aligns with vectors.
+                        var isx = footageItem.width ? (ibbox.w / footageItem.width) * 100 : 100;
+                        var isy = footageItem.height ? (ibbox.h / footageItem.height) * 100 : 100;
+                        imgLayer.property("Transform").property("Scale").setValue([isx, isy]);
+                        imgLayer.property("Transform").property("Position").setValue([ibbox.x + ibbox.w / 2, ibbox.y + ibbox.h / 2]);
+                        if (item.opacity != null && item.opacity < 1) {
+                            imgLayer.property("Transform").property("Opacity").setValue(item.opacity * 100);
+                        }
+                        if (item.blendMode && item.blendMode !== "normal") {
+                            try { imgLayer.blendingMode = _mtagAeBlend(item.blendMode); } catch (eBl) {}
+                        }
+                    }
+                }
             }
-            
+
             if (item.appearance && item.appearance.shadows && item.appearance.shadows.length > 0) {
                 var sdw = item.appearance.shadows[0];
-                var layerForShadow = (item.kind === "path" && options.grouped) ? groupedShapeLayer : (item.kind === "text" ? textLayer : layerToUse);
+                // For paths, layerToUse already points at the right layer
+                // (grouped shared layer, isolated layer, or separate layer).
+                var layerForShadow = (item.kind === "text") ? textLayer : layerToUse;
                 if (layerForShadow && !layerForShadow.property("Effects").property("Drop Shadow")) {
                     try {
                         var dropShadow = layerForShadow.property("Effects").addProperty("Drop Shadow");
@@ -963,7 +1718,15 @@ function mtagSwitchAeImport(jsonString) {
             }
         }
         
-        if (groupedShapeLayer) {
+        // Position the grouped layer AND any isolated gradient layers together
+        // so they overlay correctly (all share [0,0] base transform + absolute
+        // path coords).
+        var alignLayers = [];
+        if (groupedShapeLayer) alignLayers.push(groupedShapeLayer);
+        for (var il = 0; il < isolatedLayers.length; il++) alignLayers.push(isolatedLayers[il]);
+
+        if (options.grouped && alignLayers.length > 0) {
+            var targetAP;
             if (options.centerAnchor) {
                 var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
                 for (var i = 0; i < items.length; i++) {
@@ -975,22 +1738,23 @@ function mtagSwitchAeImport(jsonString) {
                         if (b.y + b.h > maxY) maxY = b.y + b.h;
                     }
                 }
-                if (minX !== Infinity) {
-                    var cx = minX + (maxX - minX)/2;
-                    var cy = minY + (maxY - minY)/2;
-                    groupedShapeLayer.property("Transform").property("Anchor Point").setValue([cx, cy]);
-                    groupedShapeLayer.property("Transform").property("Position").setValue([cx, cy]);
-                }
+                targetAP = (minX !== Infinity)
+                    ? [minX + (maxX - minX) / 2, minY + (maxY - minY) / 2]
+                    : [comp.width / 2, comp.height / 2];
             } else {
-                groupedShapeLayer.property("Transform").property("Anchor Point").setValue([comp.width/2, comp.height/2]);
-                groupedShapeLayer.property("Transform").property("Position").setValue([comp.width/2, comp.height/2]);
+                targetAP = [comp.width / 2, comp.height / 2];
+            }
+            for (var al = 0; al < alignLayers.length; al++) {
+                alignLayers[al].property("Transform").property("Anchor Point").setValue(targetAP);
+                alignLayers[al].property("Transform").property("Position").setValue(targetAP);
             }
         }
 
         app.endUndoGroup();
+        var reportLayer = groupedShapeLayer || (isolatedLayers.length ? isolatedLayers[0] : null);
         return _mtagOk({
-            layerIndex: groupedShapeLayer ? groupedShapeLayer.index : (items.length > 0 ? 1 : 0),
-            layerName: groupedShapeLayer ? groupedShapeLayer.name : items.length + " items imported",
+            layerIndex: reportLayer ? reportLayer.index : (items.length > 0 ? 1 : 0),
+            layerName: reportLayer ? reportLayer.name : items.length + " items imported",
             fills: totalFills,
             strokes: totalStrokes,
             warnings: warnings

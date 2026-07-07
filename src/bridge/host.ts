@@ -3,7 +3,7 @@
 // 'unknown' so callers can no-op instead of throwing.
 import type { PeerKind } from './schema';
 
-export type HostApp = 'ai' | 'ae' | 'unknown';
+export type HostApp = 'ai' | 'ae' | 'ps' | 'unknown';
 
 export function detectHost(): HostApp {
   const w = window as any;
@@ -14,12 +14,14 @@ export function detectHost(): HostApp {
     const app = (env && env.appName) || '';
     if (app === 'ILST') return 'ai';
     if (app === 'AEFT') return 'ae';
+    if (app === 'PHXS') return 'ps';
   } catch { /* noop */ }
   return 'unknown';
 }
 
 export function hostToPeerKind(h: HostApp): PeerKind {
   if (h === 'ai') return 'ai';
+  if (h === 'ps') return 'ps';
   return 'ae';
 }
 

@@ -689,6 +689,81 @@ function applyColorToSelection(hex, mode) {
     }
 }
 
+// Opens After Effects' native color picker (which has its own on-canvas
+// eyedropper) by round-tripping a throwaway Color Control effect through the
+// "Edit Value..." menu command. There is no CEP/EyeDropper API in AE's CEF
+// build, so this is the only way to reach a real picker from the panel.
+//
+// IMPORTANT: the "Edit Value..." command is modal and manages its OWN undo
+// group. Wrapping it in our own beginUndoGroup/endUndoGroup makes endUndoGroup
+// close the wrong group → "Undo group mismatch" → crash. So we deliberately
+// hold NO undo group across executeCommand, and only bracket the (non-modal)
+// cleanup in its own short group afterwards.
+//
+// A temp null hosts the Color Control; if no comp is open we spin up a tiny
+// temp comp and tear it down after. `seedHex` pre-seeds the picker with the
+// panel's current color. Returns the chosen "RRGGBB" hex, "Warning:..." if the
+// user cancelled (value unchanged), or "Error:...".
+function pickColorViaAe(seedHex) {
+    var project = app.project;
+    if (!project) return "Error:Open a project first.";
+
+    var seed = _colHexToRGB(seedHex || "808080");
+    var comp = _colComp();
+    var tempComp = null;
+    var tempNull = null;
+    var colorProp = null;
+    var picked = null;
+
+    // --- Setup + modal pick: NO undo group around any of this. ---
+    try {
+        if (!comp) {
+            tempComp = project.items.addComp("MTAG_TempColorPick", 100, 100, 1, 1, 24);
+            tempComp.openInViewer();
+            comp = tempComp;
+        }
+
+        tempNull = comp.layers.addNull();
+        tempNull.name = "MTAG - ColorPicker";
+        tempNull.enabled = false;
+
+        var colorControl = tempNull("ADBE Effect Parade").addProperty("ADBE Color Control");
+        colorProp = colorControl("ADBE Color Control-0001");
+        colorProp.setValue(seed);
+        colorProp.selected = true;
+
+        var editValueId = app.findMenuCommandId("Edit Value...");
+        if (editValueId) {
+            app.executeCommand(editValueId);         // modal AE color picker (own undo group)
+            picked = colorProp.value;
+        }
+    } catch (e) {
+        _colPickCleanup(tempNull, tempComp);
+        return "Error:" + e.toString();
+    }
+
+    _colPickCleanup(tempNull, tempComp);
+
+    if (!picked) return "Error:Color picker unavailable.";
+    var hex = _colRgbToHex(picked);
+    // Cancelling "Edit Value..." leaves the seed untouched — treat an unchanged
+    // value as a cancel so the panel doesn't record a no-op.
+    if (hex === _colRgbToHex(seed)) return "Warning:Color pick cancelled.";
+    return hex;
+}
+
+// Removes the throwaway null/comp created by pickColorViaAe. This is non-modal,
+// so it's safe to bracket in its own self-contained undo group (opened AND
+// closed here — never spanning the modal command above).
+function _colPickCleanup(tempNull, tempComp) {
+    try {
+        app.beginUndoGroup("MTAG Color - Pick Cleanup");
+        try { if (tempNull) tempNull.remove(); } catch (eN) {}
+        try { if (tempComp) tempComp.remove(); } catch (eC) {}
+        app.endUndoGroup();
+    } catch (e) { /* best-effort cleanup */ }
+}
+
 // ==========================================================================
 // MOTION GIFS — render the active comp using a bundled output-module template,
 // then hand the rendered result to the panel (Node runs ffmpeg/gifski).

@@ -546,9 +546,9 @@ export const loadPaletteWorkingState = (): { name: string; colors: string[] } | 
 
 // Motion Color panel preferences (exposed via the header ⚙ menu). Kept in its
 // own file so it's independent of the working-palette/wheel state.
-export interface ColorSettings { autoUpdateOpen: boolean; autoSyncProject: boolean }
+export interface ColorSettings { autoUpdateOpen: boolean; autoSyncProject: boolean; dedupAiAfterInsert: boolean }
 
-const COLOR_SETTINGS_DEFAULTS: ColorSettings = { autoUpdateOpen: false, autoSyncProject: false };
+const COLOR_SETTINGS_DEFAULTS: ColorSettings = { autoUpdateOpen: false, autoSyncProject: false, dedupAiAfterInsert: true };
 
 export const loadColorSettings = (): ColorSettings => {
   try {
@@ -634,6 +634,48 @@ export const saveGifSettings = (settings: GifSettings) => {
     const configPath = getConfigPath();
     if (configPath) {
       const p = path.join(path.dirname(configPath), 'gifSettings.json');
+      fs.writeFileSync(p, JSON.stringify(settings), 'utf8');
+    }
+  } catch (e) { }
+};
+
+// ------------- MTAG Switch panel settings ----------------------------------
+// Persist the Switch panel's last toggle selection (grouped / center-anchor) so
+// a fresh panel open restores the user's previous choice instead of the
+// hard-coded defaults. Stored independently in switchSettings.json.
+export interface SwitchSettings {
+  grouped: boolean;       // import all items into one layer vs. one layer each
+  centerAnchor: boolean;  // center the anchor point of the imported layer(s)
+}
+
+const SWITCH_SETTINGS_DEFAULTS: SwitchSettings = { grouped: true, centerAnchor: false };
+
+export const loadSwitchSettings = (): SwitchSettings => {
+  try {
+    const fs = window.require('fs');
+    const path = window.require('path');
+    const configPath = getConfigPath();
+    if (configPath) {
+      const p = path.join(path.dirname(configPath), 'switchSettings.json');
+      if (fs.existsSync(p)) {
+        const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+        return {
+          grouped: typeof parsed?.grouped === 'boolean' ? parsed.grouped : SWITCH_SETTINGS_DEFAULTS.grouped,
+          centerAnchor: typeof parsed?.centerAnchor === 'boolean' ? parsed.centerAnchor : SWITCH_SETTINGS_DEFAULTS.centerAnchor,
+        };
+      }
+    }
+  } catch (e) { }
+  return { ...SWITCH_SETTINGS_DEFAULTS };
+};
+
+export const saveSwitchSettings = (settings: SwitchSettings) => {
+  try {
+    const fs = window.require('fs');
+    const path = window.require('path');
+    const configPath = getConfigPath();
+    if (configPath) {
+      const p = path.join(path.dirname(configPath), 'switchSettings.json');
       fs.writeFileSync(p, JSON.stringify(settings), 'utf8');
     }
   } catch (e) { }
@@ -814,4 +856,81 @@ export const loadAiColorClip = (): { colors: string[]; ts: number } | null => {
     if (!Array.isArray(parsed?.colors)) return null;
     return { colors: parsed.colors.filter((c: unknown) => typeof c === 'string'), ts: parsed.ts || 0 };
   } catch (e) { return null; }
-};
+};
+
+// Removes the given colors from the clip after they've been inserted into a
+// palette, so the same swatches aren't re-added on the next insert. Deletes the
+// file once the clip is emptied. Case-insensitive match on hex.
+export const removeFromAiColorClip = (colors: string[]): boolean => {
+  try {
+    const fs = window.require('fs');
+    const path = window.require('path');
+    const configPath = getConfigPath();
+    if (!configPath) return false;
+    const p = path.join(path.dirname(configPath), 'aiColorClip.json');
+    if (!fs.existsSync(p)) return true;
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+    const remove = new Set(colors.map((c) => c.toUpperCase()));
+    const remaining = (Array.isArray(parsed?.colors) ? parsed.colors : [])
+      .filter((c: unknown) => typeof c === 'string' && !remove.has((c as string).toUpperCase()));
+    if (remaining.length === 0) fs.unlinkSync(p);
+    else fs.writeFileSync(p, JSON.stringify({ colors: remaining, ts: parsed.ts || Date.now() }), 'utf8');
+    return true;
+  } catch (e) { return false; }
+};
+
+// ------------- Recent color history ----------------------------------------
+// A most-recently-used ring of the last colors added/applied, so the Color
+// Palette tab can offer a "history" view. Newest first, deduped (case-
+// insensitive), capped at HISTORY_MAX. Stored as a plain string[].
+
+const HISTORY_MAX = 24;
+
+export const loadColorHistory = (): string[] => {
+  try {
+    const fs = window.require('fs');
+    const path = window.require('path');
+    const configPath = getConfigPath();
+    if (!configPath) return [];
+    const p = path.join(path.dirname(configPath), 'colorHistory.json');
+    if (!fs.existsSync(p)) return [];
+    const parsed = JSON.parse(fs.readFileSync(p, 'utf8'));
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((c: unknown) => typeof c === 'string').slice(0, HISTORY_MAX);
+  } catch (e) { return []; }
+};
+
+const saveColorHistory = (colors: string[]) => {
+  try {
+    const fs = window.require('fs');
+    const path = window.require('path');
+    const configPath = getConfigPath();
+    if (!configPath) return;
+    const p = path.join(path.dirname(configPath), 'colorHistory.json');
+    fs.writeFileSync(p, JSON.stringify(colors.slice(0, HISTORY_MAX)), 'utf8');
+  } catch (e) { }
+};
+
+// Promotes one or more colors to the front of the history ring and persists.
+// Returns the updated list so callers can update their in-memory copy without
+// a re-read.
+export const pushColorHistory = (colors: string[], prev = loadColorHistory()): string[] => {
+  const next = [...prev];
+  for (const raw of colors) {
+    const h = '#' + raw.replace(/^#/, '').toUpperCase();
+    const idx = next.findIndex((c) => c.toUpperCase() === h.toUpperCase());
+    if (idx >= 0) next.splice(idx, 1);
+    next.unshift(h);
+  }
+  const capped = next.slice(0, HISTORY_MAX);
+  saveColorHistory(capped);
+  return capped;
+};
+
+export const removeFromColorHistory = (hex: string, prev = loadColorHistory()): string[] => {
+  const next = prev.filter((c) => c.toUpperCase() !== hex.toUpperCase());
+  saveColorHistory(next);
+  return next;
+};
+
+export const clearColorHistory = (): string[] => { saveColorHistory([]); return []; };

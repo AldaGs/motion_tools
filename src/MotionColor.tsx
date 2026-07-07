@@ -4,7 +4,7 @@ import ColorPalette from './ColorPalette';
 import {
   loadPaletteWorkingState, savePaletteWorkingState, listPalettes, savePalette,
   loadColorSettings, saveColorSettings, type ColorSettings,
-  loadAiColorClip,
+  loadAiColorClip, removeFromAiColorClip,
 } from './utils/storage';
 import { syncPaletteToProject, projectPaletteExists, getProjectPaletteColors } from './utils/aeColor';
 import { exportPalette, importPalette } from './utils/paletteIO';
@@ -23,7 +23,7 @@ const SAVED_PALETTE = loadPaletteWorkingState();
 const SAVED_SETTINGS = loadColorSettings();
 
 export default function MotionColor() {
-  const [tab, setTab] = useState<Tab>('wheel');
+  const [tab, setTab] = useState<Tab>('palette');
   // The working palette lives here so the Wheel tab can push colors into it.
   const [paletteColors, setPaletteColors] = useState<string[]>(SAVED_PALETTE?.colors.map(norm) ?? []);
   const [paletteName, setPaletteName] = useState(SAVED_PALETTE?.name ?? 'Untitled');
@@ -71,19 +71,24 @@ export default function MotionColor() {
       toast.info('No AI color clip found. Use the Palette button in MTAG Switch (Illustrator) first.');
       return;
     }
-    // Merge: deduplicate against existing palette
+    // Merge: deduplicate against existing palette, counting only what's new.
     const normalized = clip.colors.map(norm);
+    const added: string[] = [];
     setPaletteColors((prev) => {
       const seen = new Set(prev.map(c => c.toUpperCase()));
       const merged = [...prev];
       for (const h of normalized) {
-        if (!seen.has(h.toUpperCase())) { seen.add(h.toUpperCase()); merged.push(h); }
+        if (!seen.has(h.toUpperCase())) { seen.add(h.toUpperCase()); merged.push(h); added.push(h); }
       }
       return merged;
     });
-    const age = Math.round((Date.now() - clip.ts) / 1000);
-    const ageStr = age < 60 ? `${age}s ago` : age < 3600 ? `${Math.round(age/60)}m ago` : `${Math.round(age/3600)}h ago`;
-    toast.success(`Added ${normalized.length} color${normalized.length === 1 ? '' : 's'} from AI (${ageStr}).`);
+    // Consume the inserted colors so they aren't re-added on the next press.
+    if (settings.dedupAiAfterInsert) removeFromAiColorClip(normalized);
+    if (added.length === 0) {
+      toast.info(`All ${normalized.length} AI color${normalized.length === 1 ? '' : 's'} already in palette.`);
+    } else {
+      toast.success(`Added ${added.length} color${added.length === 1 ? '' : 's'} from AI.`);
+    }
     if (tab !== 'palette') setTab('palette');
   };
   const handleImport = () => {
@@ -157,21 +162,8 @@ export default function MotionColor() {
   return (
     <div className="mc-root" style={{ display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: 'var(--panel-bg)', color: 'var(--panel-fg)', overflow: 'hidden' }}>
       <div style={{ position: 'relative', display: 'flex', flexShrink: 0, alignItems: 'stretch', backgroundColor: 'var(--panel-bg-sunken)', borderBottom: '1px solid var(--panel-border)' }}>
-        {tabBtn('wheel', 'Color Wheel')}
         {tabBtn('palette', 'Color Palette', paletteColors.length)}
-        {/* From AI — reads aiColorClip.json written by MTAG Switch (Illustrator) */}
-        <button onClick={handleFromAi} title="Merge colors from Illustrator selection (via MTAG Switch)"
-          style={{
-            flexShrink: 0, padding: '0 10px', cursor: 'pointer', fontSize: '11px', fontWeight: 600,
-            display: 'flex', alignItems: 'center', gap: 4,
-            backgroundColor: 'transparent',
-            color: 'var(--panel-fg-muted)',
-            border: 'none', borderLeft: '1px solid var(--panel-border)',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          <span style={{ fontSize: 14 }}>⬡</span> From AI
-        </button>
+        {tabBtn('wheel', 'Color Wheel')}
         <button onClick={() => setShowSettings((v) => !v)} title="Motion Color settings"
           style={{
             flexShrink: 0, width: 34, cursor: 'pointer',
@@ -216,6 +208,18 @@ export default function MotionColor() {
                 </span>
               </label>
 
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '12px', cursor: 'pointer' }}>
+                <input type="checkbox" checked={settings.dedupAiAfterInsert}
+                  onChange={(e) => updateSetting('dedupAiAfterInsert', e.target.checked)}
+                  style={{ marginTop: '2px', flexShrink: 0 }} />
+                <span>
+                  Dedup colors from AI after insert
+                  <span style={{ display: 'block', fontSize: '10px', color: 'var(--panel-fg-dim)', marginTop: '2px' }}>
+                    Remove colors from the AI clip once inserted, so pressing From&nbsp;AI again only brings in newly picked colors.
+                  </span>
+                </span>
+              </label>
+
               {/* Project palette */}
               <div style={{ height: 1, backgroundColor: 'var(--panel-border)' }} />
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -255,7 +259,7 @@ export default function MotionColor() {
         </div>
         <div style={{ display: tab === 'palette' ? 'block' : 'none' }}>
           <ColorPalette colors={paletteColors} setColors={setPaletteColors} name={paletteName} setName={setPaletteName}
-            onLinkChange={setLinkedToProject} />
+            onLinkChange={setLinkedToProject} onFromAi={handleFromAi} />
         </div>
       </div>
     </div>

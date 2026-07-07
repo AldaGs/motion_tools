@@ -2,7 +2,7 @@
 // Detects host (AI vs AE). In AI, "Send selection" exports the first selected
 // path and pushes an artwork.send envelope. In AE, incoming artwork.send is
 // piped straight into ExtendScript, which creates a shape layer at comp center.
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { getOrCreatePeer, type Peer, type PeerStatus } from './bridge/peer';
 import { subscribeLog, type LogEntry } from './bridge/log';
 import type { ArtworkPayload, HelloPayload, AnyItem } from './bridge/schema';
@@ -19,7 +19,8 @@ import PaletteIcon from '@mui/icons-material/Palette';
 import FormatColorFillIcon from '@mui/icons-material/FormatColorFill';
 import BorderColorIcon from '@mui/icons-material/BorderColor';
 import { IconButton, Tooltip } from '@mui/material';
-import { saveAiColorClip } from './utils/storage';
+import { saveAiColorClip, loadSwitchSettings, saveSwitchSettings } from './utils/storage';
+import { getHostTheme } from './utils/hostTheme';
 
 const CLIENT_VERSION = '0.2.0-poc';
 const PORT_RANGE: [number, number] = [47821, 47830];
@@ -37,6 +38,9 @@ interface ImportResult {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function summarizeItem(item: AnyItem): string {
+  if (item.kind === 'image') {
+    return `[Image] ${item.name}${item.linked ? '' : ' (embedded)'}`;
+  }
   if (item.kind === 'text') {
     return `[Text] ${item.name} ("${item.text.slice(0, 10)}${item.text.length > 10 ? '...' : ''}") · ${item.font} ${item.fontSize}px`;
   }
@@ -63,6 +67,7 @@ const statusColor: Record<PeerStatus, string> = {
 export default function MtagSwitch() {
   const peerRef = useRef<Peer | null>(null);
   const host = useMemo<HostApp>(() => detectHost(), []);
+  const theme = useMemo(() => getHostTheme(), []);
   const [status, setStatus] = useState<PeerStatus>('idle');
   const [remote, setRemote] = useState<HelloPayload | null>(null);
   const [logs, setLogs] = useState<LogEntry[]>([]);
@@ -71,9 +76,20 @@ export default function MtagSwitch() {
   const [lastResult, setLastResult] = useState<string | null>(null);
   // Default to BridgeTalk: no second panel required, no port/handshake pain.
   const [transport, setTransport] = useState<Transport>('bridgetalk');
-  const [grouped, setGrouped] = useState(true);
-  const [centerAnchor, setCenterAnchor] = useState(false);
+  // Restore the last-used toggle selection from disk so reopening the panel
+  // keeps the user's choice instead of reverting to defaults.
+  const savedSwitch = useMemo(() => loadSwitchSettings(), []);
+  const [grouped, setGrouped] = useState(savedSwitch.grouped);
+  const [centerAnchor, setCenterAnchor] = useState(savedSwitch.centerAnchor);
   const [lastPickInfo, setLastPickInfo] = useState<string | null>(null);
+  // Per-project image export/import folder (AE side only). Stored inside the
+  // .aep via the project's XMP packet, so it travels with the project file.
+  const [exportDir, setExportDir] = useState<string | null>(null);
+  const [exportDirBusy, setExportDirBusy] = useState(false);
+  const [exportDirNotice, setExportDirNotice] = useState<string | null>(null);
+  // Send-time prompt (AI/PS) when the AE project has no image folder set yet.
+  const [folderPrompt, setFolderPrompt] = useState<{ projectSaved: boolean; aepDir: string | null } | null>(null);
+  const folderPromptResolve = useRef<((chosen: boolean) => void) | null>(null);
 
   const pickColors = async (mode: 'fill' | 'stroke' | 'both') => {
     setBusy(true);
@@ -96,6 +112,12 @@ export default function MtagSwitch() {
     }
   };
 
+  // Persist the toggle selection whenever it changes so the next panel open
+  // restores it.
+  useEffect(() => {
+    saveSwitchSettings({ grouped, centerAnchor });
+  }, [grouped, centerAnchor]);
+
   useEffect(() => {
     let cancelled = false;
     loadSwitchScript()
@@ -103,6 +125,61 @@ export default function MtagSwitch() {
       .catch((e) => logErr(`load mtagSwitch.jsx failed: ${e.message}`));
     return () => { cancelled = true; };
   }, [host]);
+
+  // Load the per-project image folder from the active AE project's XMP packet.
+  // Waits for the companion script to load first (evalJsx needs it defined).
+  useEffect(() => {
+    if (host !== 'ae') return;
+    let cancelled = false;
+    loadSwitchScript()
+      .then(() => evalJsx<Record<string, unknown>>('mtagGetProjectSettings()'))
+      .then((s) => {
+        if (!cancelled) setExportDir(typeof s.imageExportDir === 'string' ? s.imageExportDir : null);
+      })
+      .catch(() => { /* no project open, or XMP unavailable — leave unset */ });
+    return () => { cancelled = true; };
+  }, [host]);
+
+  const chooseExportDir = async () => {
+    setExportDirBusy(true);
+    setExportDirNotice(null);
+    try {
+      const res = await evalJsx<{ path?: string; cancelled?: boolean }>(`mtagPickFolder(${jsxStr(exportDir || '')})`);
+      if (res.cancelled || !res.path) return;
+      await evalJsx(`mtagSetProjectSetting(${jsxStr('imageExportDir')}, ${jsxStr(res.path)})`);
+      setExportDir(res.path);
+      logInfo(`project image folder → ${res.path} (save the project to persist)`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      logErr(`set image folder failed: ${msg}`);
+    } finally {
+      setExportDirBusy(false);
+    }
+  };
+
+  // Set the image folder to an "MTAG_Images" folder next to the saved .aep.
+  // If the project has never been saved it has no location — prompt to save.
+  const useFolderNextToFile = async () => {
+    setExportDirBusy(true);
+    setExportDirNotice(null);
+    try {
+      const res = await evalJsx<{ dir: string }>('mtagGetProjectDir()');
+      const target = `${res.dir}/MTAG_Images`;
+      await evalJsx(`mtagSetProjectSetting(${jsxStr('imageExportDir')}, ${jsxStr(target)})`);
+      setExportDir(target);
+      logInfo(`project image folder → ${target}`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg === 'unsaved') {
+        setExportDirNotice('Save the project first (File ▸ Save), then try again.');
+      } else {
+        logErr(`next-to-file failed: ${msg}`);
+        setExportDirNotice(msg);
+      }
+    } finally {
+      setExportDirBusy(false);
+    }
+  };
 
   // Log subscription is independent of transport so the diagnostic panel works
   // in BridgeTalk mode too (where no WebSocket peer exists).
@@ -123,7 +200,7 @@ export default function MtagSwitch() {
       kind: hostToPeerKind(host),
       portRange: PORT_RANGE,
       clientVersion: CLIENT_VERSION,
-      capabilities: host === 'ai' ? ['artwork.export'] : host === 'ae' ? ['artwork.import'] : [],
+      capabilities: (host === 'ai' || host === 'ps') ? ['artwork.export'] : host === 'ae' ? ['artwork.import'] : [],
     });
     peerRef.current = peer;
 
@@ -183,11 +260,94 @@ export default function MtagSwitch() {
     setLastResult(`sent ${payload.items.length} item(s) (websocket)`);
   };
 
+  // Poll the shared BridgeTalk result file, unwrapping the {ok,data} envelope
+  // the receiver wrote. Returns the data, or null on error/timeout.
+  const pollBeamResult = async <T,>(attempts = 32, interval = 250): Promise<T | null> => {
+    for (let i = 0; i < attempts; i++) {
+      await sleep(interval);
+      const poll = await evalJsx<{ pending: boolean; result?: string }>('mtagSwitchReadBeamResult()');
+      if (poll.pending || !poll.result) continue;
+      try {
+        const parsed = JSON.parse(poll.result);
+        if (parsed && parsed.ok === false) { logErr(`AE: ${parsed.error}`); return null; }
+        return parsed.data as T;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
+
+  // Persist a chosen folder into the AE project (over BridgeTalk).
+  const applyAeFolder = async (dir: string) => {
+    const scriptPath = getSwitchScriptPath();
+    await evalJsx(`mtagSwitchSetAeImageDir(${jsxStr(scriptPath)}, ${jsxStr(dir)})`);
+    await pollBeamResult();
+    logInfo(`AE image folder set → ${dir}`);
+  };
+
+  const finishFolderPrompt = (chosen: boolean) => {
+    setFolderPrompt(null);
+    const r = folderPromptResolve.current;
+    folderPromptResolve.current = null;
+    if (r) r(chosen);
+  };
+
+  // Called before beaming a payload that contains images. Asks AE whether it
+  // already has an image folder; if not, prompts the user (Choose / Next-to-
+  // AEP) and writes the choice back. Returns false only if the user cancels.
+  const ensureImageFolder = async (): Promise<boolean> => {
+    const scriptPath = getSwitchScriptPath();
+    try {
+      await evalJsx(`mtagSwitchQueryAeImageDir(${jsxStr(scriptPath)})`);
+    } catch (e) {
+      logErr(`couldn't reach AE to check image folder: ${e instanceof Error ? e.message : String(e)} — proceeding`);
+      return true; // AE auto-resolves on import
+    }
+    const info = await pollBeamResult<{ imageDirSet: boolean; imageDir: string | null; projectSaved: boolean; aepDir: string | null }>();
+    if (!info) {
+      logErr('AE did not respond to folder check — proceeding (AE will auto-place images)');
+      return true;
+    }
+    if (info.imageDirSet) {
+      logInfo(`AE image folder: ${info.imageDir}`);
+      return true;
+    }
+    // Unset → prompt and wait for the user's choice.
+    return await new Promise<boolean>((resolve) => {
+      folderPromptResolve.current = resolve;
+      setFolderPrompt({ projectSaved: info.projectSaved, aepDir: info.aepDir });
+    });
+  };
+
+  const promptChooseFolder = async () => {
+    try {
+      const start = folderPrompt?.aepDir || '';
+      const res = await evalJsx<{ path?: string; cancelled?: boolean }>(`mtagPickFolder(${jsxStr(start)})`);
+      if (res.cancelled || !res.path) return; // keep the prompt open
+      await applyAeFolder(res.path);
+      finishFolderPrompt(true);
+    } catch (e) {
+      logErr(`choose folder failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const promptNextToAep = async () => {
+    if (!folderPrompt?.projectSaved || !folderPrompt.aepDir) return;
+    try {
+      await applyAeFolder(`${folderPrompt.aepDir}/MTAG_Images`);
+      finishFolderPrompt(true);
+    } catch (e) {
+      logErr(`next-to-project failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   // BridgeTalk path: hands the payload to the target app directly. No panel
   // needs to be open on the receiving side.
   const sendViaBridgeTalk = async (payload: ArtworkPayload) => {
     const scriptPath = getSwitchScriptPath();
-    const target = host === 'ai' ? 'ae' : 'ai';
+    // AI and PS both send to AE; AE sends back to AI.
+    const target = host === 'ae' ? 'ai' : 'ae';
     const json = JSON.stringify(payload);
     logInfo(`beam → ${target} (${json.length}b)`);
     const beam = await evalJsx<{ sent: boolean; target: string; targetRunning: boolean }>(
@@ -227,9 +387,23 @@ export default function MtagSwitch() {
     setBusy(true);
     setLastResult(null);
     try {
-      const payload = await evalJsx<ArtworkPayload>(`mtagSwitchAiExport(${grouped}, ${centerAnchor})`);
-      if (transport === 'bridgetalk') await sendViaBridgeTalk(payload);
-      else await sendViaWebSocket(payload);
+      const exportFn = host === 'ps' ? 'mtagSwitchPsExport' : 'mtagSwitchAiExport';
+      const payload = await evalJsx<ArtworkPayload>(`${exportFn}(${grouped}, ${centerAnchor})`);
+      if (payload.skipped && payload.skipped.length) {
+        logErr(`skipped ${payload.skipped.length} unsupported item(s): ${payload.skipped.join(', ')}`);
+      }
+      if (transport === 'bridgetalk') {
+        // Images need a destination folder in the AE project — resolve it (and
+        // prompt if unset) before beaming.
+        const hasImages = payload.items.some((it) => it.kind === 'image');
+        if (hasImages) {
+          const ok = await ensureImageFolder();
+          if (!ok) { setLastResult('send cancelled — no image folder chosen'); return; }
+        }
+        await sendViaBridgeTalk(payload);
+      } else {
+        await sendViaWebSocket(payload);
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setLastResult(`error: ${msg}`);
@@ -257,68 +431,96 @@ export default function MtagSwitch() {
     return status;
   }, [status, remote]);
 
-  const hostLabel = host === 'ai' ? 'Illustrator' : host === 'ae' ? 'After Effects' : 'Unknown host';
+  const hostLabel = host === 'ai' ? 'Illustrator' : host === 'ae' ? 'After Effects' : host === 'ps' ? 'Photoshop' : 'Unknown host';
 
   const [showLogs, setShowLogs] = useState(false);
+
+  // Adobe-style flat buttons for the plain HTML controls (folder row, prompt,
+  // diagnostics). `primary` fills with the host accent.
+  const btn = (opts?: { primary?: boolean; disabled?: boolean }): CSSProperties => ({
+    padding: '4px 10px', borderRadius: 3, fontSize: theme.fontSize - 1,
+    fontFamily: theme.fontFamily, whiteSpace: 'nowrap',
+    border: `1px solid ${opts?.primary ? theme.accent : theme.border}`,
+    background: opts?.disabled ? theme.bgInset : opts?.primary ? theme.accent : theme.bgElevated,
+    color: opts?.disabled ? theme.textDim : opts?.primary ? theme.accentText : theme.text,
+    cursor: opts?.disabled ? 'default' : 'pointer',
+    opacity: opts?.disabled ? 0.5 : 1,
+  });
 
   return (
     <div style={{
       display: 'flex', flexDirection: 'column', height: '100vh',
-      background: '#1e1e1e', color: '#ddd', fontFamily: 'system-ui, sans-serif',
-      fontSize: 12, padding: 4, gap: 4, boxSizing: 'border-box',
+      background: theme.bg, color: theme.text, fontFamily: theme.fontFamily,
+      fontSize: theme.fontSize, padding: 6, gap: 5, boxSizing: 'border-box',
       overflowY: 'auto', overflowX: 'hidden'
     }}>
-      {host === 'ai' && (() => {
+      {(host === 'ai' || host === 'ps') && (() => {
         const canSend = !busy && (transport === 'bridgetalk' || status === 'ready');
-        const tooltipProps = { slotProps: { tooltip: { sx: { fontSize: 13, padding: '6px 10px', backgroundColor: '#333' } } } };
+        const tooltipProps = { slotProps: { tooltip: { sx: {
+          fontSize: 12, padding: '5px 9px', backgroundColor: theme.bgInset,
+          color: theme.text, border: `1px solid ${theme.border}`, borderRadius: '3px',
+        } } } };
+
+        // Adobe-style square tool button. `active` = toggled/pressed (accent
+        // icon on an inset ground); `primary` = filled accent (the Send action).
+        const toolSx = (active: boolean, primary = false) => ({
+          width: 28, height: 28, borderRadius: '3px',
+          color: primary ? theme.accentText : active ? theme.accent : theme.textDim,
+          background: primary ? theme.accent : active ? theme.bgInset : theme.bgElevated,
+          border: `1px solid ${primary ? theme.accent : theme.border}`,
+          transition: 'background .12s, color .12s',
+          '&:hover': {
+            background: primary ? theme.accent : theme.hover,
+            color: primary ? theme.accentText : active ? theme.accent : theme.text,
+          },
+          '&.Mui-disabled': { color: theme.textDim, background: theme.bgElevated, opacity: 0.45 },
+        });
+        const colorSx = {
+          width: 28, height: 28, borderRadius: '3px',
+          color: busy ? theme.textDim : '#e0913f',
+          background: theme.bgElevated, border: `1px solid ${theme.border}`,
+          '&:hover': { background: theme.hover },
+          '&.Mui-disabled': { color: theme.textDim, opacity: 0.45 },
+        };
 
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
             {/* Row 1: Core switch tools & Diagnostics */}
-            <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
               <Tooltip title="Send to After Effects" {...tooltipProps}>
                 <span>
-                  <IconButton 
-                    onClick={sendSelection} 
-                    disabled={!canSend}
-                    size="small"
-                    sx={{ 
-                      width: 30, height: 30,
-                      color: canSend ? '#dfd' : '#555', 
-                      background: canSend ? '#2a4a2a' : '#222', 
-                      '&:hover': { background: canSend ? '#3b5b3b' : '#222' } 
-                    }}
-                  >
+                  <IconButton onClick={sendSelection} disabled={!canSend} size="small" sx={toolSx(false, canSend)}>
                     <SendIcon fontSize="small" />
                   </IconButton>
                 </span>
               </Tooltip>
 
               <Tooltip title={grouped ? "Grouped in one layer" : "Each in a different layer"} {...tooltipProps}>
-                <IconButton onClick={() => setGrouped(!grouped)} size="small" sx={{ width: 30, height: 30, color: grouped ? '#4a90e2' : '#888' }}>
+                <IconButton onClick={() => setGrouped(!grouped)} size="small" sx={toolSx(grouped)}>
                   {grouped ? <LayersIcon fontSize="small" /> : <LayersClearIcon fontSize="small" />}
                 </IconButton>
               </Tooltip>
 
               <Tooltip title={centerAnchor ? "Center anchor point in layer" : "Default anchor point"} {...tooltipProps}>
-                <IconButton onClick={() => setCenterAnchor(!centerAnchor)} size="small" sx={{ width: 30, height: 30, color: centerAnchor ? '#4a90e2' : '#888' }}>
+                <IconButton onClick={() => setCenterAnchor(!centerAnchor)} size="small" sx={toolSx(centerAnchor)}>
                   {centerAnchor ? <FilterCenterFocusIcon fontSize="small" /> : <CropFreeIcon fontSize="small" />}
                 </IconButton>
               </Tooltip>
 
               {/* Diagnostics aligned to right */}
               <Tooltip title="Toggle Diagnostics" {...tooltipProps}>
-                <IconButton onClick={() => setShowLogs(!showLogs)} size="small" sx={{ width: 30, height: 30, color: showLogs ? '#fff' : '#888', marginLeft: 'auto' }}>
+                <IconButton onClick={() => setShowLogs(!showLogs)} size="small" sx={{ ...toolSx(showLogs), marginLeft: 'auto' }}>
                   <BugReportIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
             </div>
 
-            {/* Row 2: Color pickers */}
-            <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+            {/* Row 2: Color pickers (Illustrator only) */}
+            {host === 'ai' && (
+            <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
               <Tooltip title="Send Fill Colors to Palette" {...tooltipProps}>
                 <span>
-                  <IconButton disabled={busy} onClick={() => pickColors('fill')} size="small" sx={{ width: 30, height: 30, color: busy ? '#555' : '#e2a14a' }}>
+                  <IconButton disabled={busy} onClick={() => pickColors('fill')} size="small" sx={colorSx}>
                     <FormatColorFillIcon fontSize="small" />
                   </IconButton>
                 </span>
@@ -326,7 +528,7 @@ export default function MtagSwitch() {
 
               <Tooltip title="Send Stroke Colors to Palette" {...tooltipProps}>
                 <span>
-                  <IconButton disabled={busy} onClick={() => pickColors('stroke')} size="small" sx={{ width: 30, height: 30, color: busy ? '#555' : '#e2a14a' }}>
+                  <IconButton disabled={busy} onClick={() => pickColors('stroke')} size="small" sx={colorSx}>
                     <BorderColorIcon fontSize="small" />
                   </IconButton>
                 </span>
@@ -334,47 +536,110 @@ export default function MtagSwitch() {
 
               <Tooltip title="Send Both (Fill + Stroke) to Palette" {...tooltipProps}>
                 <span>
-                  <IconButton disabled={busy} onClick={() => pickColors('both')} size="small" sx={{ width: 30, height: 30, color: busy ? '#555' : '#e2a14a' }}>
+                  <IconButton disabled={busy} onClick={() => pickColors('both')} size="small" sx={colorSx}>
                     <PaletteIcon fontSize="small" />
                   </IconButton>
                 </span>
               </Tooltip>
             </div>
+            )}
           </div>
         );
       })()}
 
       {lastPickInfo && (
-        <div style={{ fontSize: 10, color: lastPickInfo.startsWith('Error') ? '#f88' : '#8f8', padding: '2px 4px' }}>
+        <div style={{ fontSize: theme.fontSize - 1, color: lastPickInfo.startsWith('Error') ? '#e8756b' : theme.textDim, padding: '2px 4px' }}>
           {lastPickInfo}
         </div>
       )}
 
-      {host === 'ae' && (
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <div style={{
-            flex: 1, padding: '8px 10px', border: '1px dashed #444', borderRadius: 3,
-            background: '#181818', opacity: 0.85,
-          }}>
-            {transport === 'bridgetalk'
-              ? 'Receiver (BridgeTalk)'
-              : 'Receiver (WebSocket)'}
+      {folderPrompt && (
+        <div style={{
+          border: `1px solid ${theme.accent}`, borderRadius: 4, background: theme.bgElevated,
+          padding: 8, display: 'flex', flexDirection: 'column', gap: 6, fontSize: theme.fontSize,
+        }}>
+          <div style={{ color: theme.text }}>
+            The After Effects project has no image folder set. Where should imported images go?
           </div>
-          <Tooltip title="Toggle Diagnostics">
-            <IconButton onClick={() => setShowLogs(!showLogs)} sx={{ color: showLogs ? '#fff' : '#888' }}>
-              <BugReportIcon />
-            </IconButton>
-          </Tooltip>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <button onClick={promptChooseFolder} style={btn({ primary: true })}>Choose folder…</button>
+            <button
+              onClick={promptNextToAep}
+              disabled={!folderPrompt.projectSaved}
+              title={folderPrompt.projectSaved ? 'Use an MTAG_Images folder next to the .aep' : 'Save the AE project first'}
+              style={btn({ disabled: !folderPrompt.projectSaved })}
+            >Next to project</button>
+            <button onClick={() => finishFolderPrompt(false)} style={{ ...btn(), marginLeft: 'auto' }}>Cancel</button>
+          </div>
+          {!folderPrompt.projectSaved && (
+            <div style={{ color: '#e2c14a', fontSize: theme.fontSize - 1 }}>
+              Save the AE project (File ▸ Save) to enable “Next to project”.
+            </div>
+          )}
+        </div>
+      )}
+
+      {host === 'ae' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <div style={{
+              flex: 1, padding: '7px 10px', border: `1px solid ${theme.border}`, borderRadius: 3,
+              background: theme.bgInset, color: theme.textDim,
+            }}>
+              {transport === 'bridgetalk'
+                ? 'Receives automatically — this panel can stay closed'
+                : 'Receiver (WebSocket)'}
+            </div>
+            <Tooltip title="Toggle Diagnostics">
+              <IconButton onClick={() => setShowLogs(!showLogs)} size="small" sx={{
+                width: 28, height: 28, borderRadius: '3px',
+                color: showLogs ? theme.accent : theme.textDim,
+                background: showLogs ? theme.bgInset : theme.bgElevated,
+                border: `1px solid ${theme.border}`,
+                '&:hover': { background: theme.hover },
+              }}>
+                <BugReportIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </div>
+
+          {/* Per-project image folder (stored in the .aep's XMP metadata). */}
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: theme.fontSize }}>
+            <span style={{ color: theme.textDim, whiteSpace: 'nowrap' }}>Image folder:</span>
+            <span
+              title={exportDir || 'Not set — choose where imported images are stored for this project'}
+              style={{
+                flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                direction: 'rtl', textAlign: 'left',
+                color: exportDir ? theme.text : theme.textDim, fontFamily: 'ui-monospace, monospace',
+              }}
+            >
+              {exportDir || 'not set (per-project)'}
+            </span>
+            <button onClick={chooseExportDir} disabled={exportDirBusy} style={btn({ disabled: exportDirBusy })}>Choose…</button>
+            <button
+              onClick={useFolderNextToFile}
+              disabled={exportDirBusy}
+              title="Use an MTAG_Images folder next to the saved project file"
+              style={btn({ disabled: exportDirBusy })}
+            >Next to file</button>
+          </div>
+
+          {exportDirNotice && (
+            <div style={{ fontSize: theme.fontSize - 1, color: '#e2c14a', padding: '0 2px' }}>
+              {exportDirNotice}
+            </div>
+          )}
         </div>
       )}
 
       {host === 'unknown' && (
-        <div style={{ padding: '8px 10px', border: '1px solid #c44', borderRadius: 3, color: '#f99' }}>
+        <div style={{ padding: '8px 10px', border: '1px solid #c4574d', borderRadius: 3, color: '#e8756b', background: theme.bgInset }}>
           Not running in a CEP host.
         </div>
       )}
-      
-      {lastResult && <div style={{ opacity: 0.7, padding: '0 4px' }}>{lastResult}</div>}
+
+      {lastResult && <div style={{ color: theme.textDim, padding: '0 4px' }}>{lastResult}</div>}
 
       {showLogs && (
         <>
@@ -384,23 +649,24 @@ export default function MtagSwitch() {
             ) : (
               <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#3fb950', boxShadow: '0 0 6px #3fb950' }} />
             )}
-            <strong style={{ fontSize: 13 }}>Diagnostics</strong>
-            <span style={{ opacity: 0.6, fontSize: 11 }}>· {hostLabel}</span>
-            <span style={{ opacity: 0.7, marginLeft: 'auto' }}>
+            <strong style={{ fontSize: theme.fontSize + 1 }}>Diagnostics</strong>
+            <span style={{ color: theme.textDim, fontSize: theme.fontSize - 1 }}>· {hostLabel}</span>
+            <span style={{ color: theme.textDim, marginLeft: 'auto' }}>
               {transport === 'websocket' ? statusText : 'BridgeTalk'}
             </span>
           </div>
 
-          <div style={{ display: 'flex', gap: 4, fontSize: 11 }}>
+          <div style={{ display: 'flex', gap: 4, fontSize: theme.fontSize }}>
             {(['bridgetalk', 'websocket'] as Transport[]).map((t) => (
               <button
                 key={t}
                 onClick={() => setTransport(t)}
                 style={{
                   flex: 1, padding: '4px 6px', borderRadius: 3, cursor: 'pointer',
-                  border: `1px solid ${transport === t ? '#4a7' : '#444'}`,
-                  background: transport === t ? '#213' : '#222',
-                  color: transport === t ? '#cfd' : '#999',
+                  fontFamily: theme.fontFamily, fontSize: theme.fontSize,
+                  border: `1px solid ${transport === t ? theme.accent : theme.border}`,
+                  background: transport === t ? theme.bgInset : theme.bgElevated,
+                  color: transport === t ? theme.accent : theme.textDim,
                 }}
               >{t === 'bridgetalk' ? 'BridgeTalk' : 'WebSocket'}</button>
             ))}
@@ -408,22 +674,17 @@ export default function MtagSwitch() {
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
             <div style={{ fontWeight: 600 }}>Wire log</div>
-            <button
-              onClick={copyAll}
-              style={{
-                marginLeft: 'auto', padding: '2px 8px', fontSize: 11,
-                border: '1px solid #444', background: '#2a2a2a', color: '#ccc',
-                borderRadius: 3, cursor: 'pointer',
-              }}
-            >{copyStatus ?? 'Copy logs'}</button>
+            <button onClick={copyAll} style={{ ...btn(), marginLeft: 'auto', padding: '2px 8px' }}>
+              {copyStatus ?? 'Copy logs'}
+            </button>
           </div>
           <div style={{
-            flex: 1, minHeight: 60, overflow: 'auto', background: '#141414',
-            border: '1px solid #333', borderRadius: 3, padding: 6, fontFamily: 'ui-monospace, monospace',
+            flex: 1, minHeight: 60, overflow: 'auto', background: theme.bgInset,
+            border: `1px solid ${theme.border}`, borderRadius: 3, padding: 6, fontFamily: 'ui-monospace, monospace',
           }}>
-            {wire.length === 0 && <div style={{ opacity: 0.5 }}>no messages yet</div>}
+            {wire.length === 0 && <div style={{ color: theme.textDim }}>no messages yet</div>}
             {wire.map((w, i) => (
-              <div key={i} style={{ color: w.dir === 'in' ? '#7cf' : '#fc7' }}>
+              <div key={i} style={{ color: w.dir === 'in' ? '#6cb6ff' : '#e0913f' }}>
                 {w.dir === 'in' ? '← ' : '→ '}{w.type} · {w.summary}
               </div>
             ))}
@@ -431,12 +692,12 @@ export default function MtagSwitch() {
 
           <div style={{ fontWeight: 600 }}>Transport log</div>
           <div style={{
-            height: 130, overflow: 'auto', background: '#141414',
-            border: '1px solid #333', borderRadius: 3, padding: 6, fontFamily: 'ui-monospace, monospace',
+            height: 130, overflow: 'auto', background: theme.bgInset,
+            border: `1px solid ${theme.border}`, borderRadius: 3, padding: 6, fontFamily: 'ui-monospace, monospace',
           }}>
             {logs.slice(-60).map((l, i) => (
               <div key={i} style={{
-                color: l.level === 'error' ? '#f77' : l.level === 'warn' ? '#fc7' : '#9c9',
+                color: l.level === 'error' ? '#e8756b' : l.level === 'warn' ? '#e0913f' : theme.textDim,
               }}>
                 [{new Date(l.ts).toLocaleTimeString()}] {l.msg}
               </div>

@@ -17,9 +17,14 @@
   <ExecutionEnvironment>
     <HostList>
       <Host Name="AEFT" Version="15.0" />
-      <!-- Illustrator added for MTAG Switch. Other extensions in this bundle
-           will also appear in AI's Extensions menu until we split bundles. -->
+      <!-- Bundle-level default hosts. Per-extension <HostList> blocks inside each
+           <Extension> below OVERRIDE this list to scope panels: the AE panels use
+           AEFT only, MTAG Switch uses ILST+PHXS. This is the modern CEP 7.0+ form
+           (NOT the legacy <DispatchInfo Host="…"> attribute, which the CSXS 7.0
+           validator rejects and which nukes the whole bundle). Do not mix the
+           two mechanisms. -->
       <Host Name="ILST" Version="24.0" />
+      <Host Name="PHXS" Version="24.0" />
     </HostList>
     <LocaleList>
       <Locale Code="All" />
@@ -32,6 +37,7 @@
   <DispatchInfoList>
     
     <Extension Id="com.motiontoolbar.panel.main">
+      <HostList><Host Name="AEFT" /></HostList>
       <DispatchInfo>
         <Resources>
           <MainPath>./dist/index.html</MainPath> 
@@ -55,6 +61,7 @@
     </Extension>
 
     <Extension Id="com.motiontoolbar.panel.secondary">
+      <HostList><Host Name="AEFT" /></HostList>
       <DispatchInfo>
         <Resources>
           <MainPath>./dist/index.html</MainPath> 
@@ -77,6 +84,7 @@
     </Extension>
 
     <Extension Id="com.motiontoolbar.panel.easing">
+      <HostList><Host Name="AEFT" /></HostList>
       <DispatchInfo>
         <Resources>
           <MainPath>./dist/index.html</MainPath> 
@@ -99,6 +107,7 @@
     </Extension>
 
     <Extension Id="com.motiontoolbar.panel.color">
+      <HostList><Host Name="AEFT" /></HostList>
       <DispatchInfo>
         <Resources>
           <MainPath>./dist/index.html</MainPath>
@@ -121,6 +130,7 @@
     </Extension>
 
     <Extension Id="com.motiontoolbar.panel.gifs">
+      <HostList><Host Name="AEFT" /></HostList>
       <DispatchInfo>
         <Resources>
           <MainPath>./dist/index.html</MainPath>
@@ -144,6 +154,7 @@
     </Extension>
 
     <Extension Id="com.motiontoolbar.panel.gifsettings">
+      <HostList><Host Name="AEFT" /></HostList>
       <DispatchInfo>
         <Resources>
           <MainPath>./dist/index.html</MainPath>
@@ -166,6 +177,7 @@
     </Extension>
 
     <Extension Id="com.motiontoolbar.panel.dialog">
+      <HostList><Host Name="AEFT" /></HostList>
       <DispatchInfo>
         <Resources>
           <MainPath>./dist/index.html</MainPath>
@@ -187,6 +199,7 @@
     </Extension>
 
     <Extension Id="com.motiontoolbar.panel.switch">
+      <HostList><Host Name="ILST" /><Host Name="PHXS" /></HostList>
       <DispatchInfo>
         <Resources>
           <MainPath>./dist/index.html</MainPath>
@@ -213,6 +226,7 @@
          panel. No <Menu> element, so it never appears in AE's Window menu —
          it's only reachable via the panel's ⚙ button. -->
     <Extension Id="com.motiontoolbar.panel.toolbarsettings">
+      <HostList><Host Name="AEFT" /></HostList>
       <DispatchInfo>
         <Resources>
           <MainPath>./dist/index.html</MainPath>
@@ -235,6 +249,7 @@
 
     <!-- Dedicated (nameless) settings panel for the Motion Easing panel. -->
     <Extension Id="com.motiontoolbar.panel.easingsettings">
+      <HostList><Host Name="AEFT" /></HostList>
       <DispatchInfo>
         <Resources>
           <MainPath>./dist/index.html</MainPath>

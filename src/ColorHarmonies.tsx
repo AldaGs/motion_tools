@@ -11,6 +11,10 @@ import {
 } from './utils/color';
 import { toast } from './utils/toast';
 import ContextMenu, { type ContextMenuItem } from './components/ContextMenu';
+import ContrastChecker from './components/ContrastChecker';
+import FeatherIcon from './components/FeatherIcon';
+import { pickScreenColor, EYEDROPPER_AVAILABLE } from './utils/eyedropper';
+import { copyFormatItems } from './utils/copyFormats';
 import { loadColorState, saveColorState } from './utils/storage';
 
 // Restore the previous session's config so a fresh panel open picks up where
@@ -74,11 +78,6 @@ const copyText = async (text: string): Promise<boolean> => {
   } catch {
     return false;
   }
-};
-
-const contrastText = (hex: string): string => {
-  const hsl = hexToHsl(hex);
-  return hsl && hsl.l < 55 ? '#fff' : '#111';
 };
 
 interface Props {
@@ -168,6 +167,13 @@ export default function ColorHarmonies({ onAddToPalette }: Props = {}) {
     toast.success(hexes.length === 1 ? `Sent ${hexes[0]} to palette.` : `Sent ${hexes.length} colors to palette.`);
   };
 
+  const pickFromScreen = async () => {
+    const hex = await pickScreenColor(baseHex);
+    if (!hex) return;
+    const hsl = hexToHsl(hex);
+    if (hsl) applyBase(hsl);
+  };
+
   const basePos = hslToXY(base.h, base.s, R);
 
   return (
@@ -233,6 +239,12 @@ export default function ColorHarmonies({ onAddToPalette }: Props = {}) {
               spellCheck={false}
               style={{ flex: 1, minWidth: 0, padding: '8px', fontFamily: 'monospace', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }}
             />
+            {EYEDROPPER_AVAILABLE && (
+              <button onClick={pickFromScreen} title="Pick a color with After Effects' eyedropper"
+                style={{ width: 34, height: 34, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }}>
+                <FeatherIcon name="crosshair" size={16} />
+              </button>
+            )}
           </div>
 
           <button onClick={() => setShowSliders((v) => !v)}
@@ -308,7 +320,7 @@ export default function ColorHarmonies({ onAddToPalette }: Props = {}) {
                 </button>
               </div>
             </div>
-            <div style={{ display: 'flex', gap: '5px', height: 50 }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '5px' }}>
               {harm.colors.map((c, i) => {
                 const hex = hslToHex(c);
                 return (
@@ -321,15 +333,10 @@ export default function ColorHarmonies({ onAddToPalette }: Props = {}) {
                     onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
                     title={`${hex} — click to copy · right-click for menu`}
                     style={{
-                      flex: 1, backgroundColor: hex, cursor: 'pointer', position: 'relative',
-                      display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 4,
-                      borderRadius: 'var(--radius-md)',
+                      width: 30, height: 30, flexShrink: 0, backgroundColor: hex, cursor: 'pointer', position: 'relative',
+                      borderRadius: 'var(--radius-sm)',
                       boxShadow: i === 0 ? '0 0 0 2px var(--panel-fg)' : 'inset 0 0 0 1px rgba(0,0,0,0.25)',
-                    }}>
-                    <span style={{ fontSize: '9px', fontFamily: 'monospace', color: contrastText(hex), opacity: 0.9 }}>
-                      {hex.replace('#', '')}
-                    </span>
-                  </div>
+                    }} />
                 );
               })}
             </div>
@@ -338,13 +345,16 @@ export default function ColorHarmonies({ onAddToPalette }: Props = {}) {
       </div>
       </div>
 
+      {/* ---- WCAG contrast checker: base color vs. the active harmony ---- */}
+      <ContrastChecker foreground={baseHex} swatches={activeColors.map(hslToHex)} />
+
       {swatchMenu && (() => {
         const c = swatchMenu.color;
         const hex = hslToHex(c);
         const items: ContextMenuItem[] = [];
         if (onAddToPalette) items.push({ id: 'send', icon: '→', label: 'Send to palette', onSelect: () => sendToPalette([c]) });
-        items.push({ id: 'copy', icon: '⧉', label: `Copy ${hex}`, onSelect: () => copy(hex) });
-        items.push({ id: 'key', icon: '◎', label: 'Set as key color', divider: !!onAddToPalette, onSelect: () => applyBase(c) });
+        items.push(...copyFormatItems(hex, !!onAddToPalette));
+        items.push({ id: 'key', icon: '◎', label: 'Set as key color', divider: true, onSelect: () => applyBase(c) });
         return <ContextMenu x={swatchMenu.x} y={swatchMenu.y} items={items} onClose={() => setSwatchMenu(null)} />;
       })()}
     </div>

@@ -29,6 +29,21 @@ export const applyColorToSelection = async (hex: string, mode: 'fill' | 'stroke'
   return report(result);
 };
 
+// Opens After Effects' native color picker (with its on-canvas eyedropper) via
+// a throwaway Color Control effect. `seedHex` pre-seeds the picker. Returns the
+// picked '#'-prefixed hex, or null if cancelled / errored (errors are toasted;
+// a cancel is silent).
+export const pickColorViaAe = async (seedHex: string): Promise<string | null> => {
+  if (!isCEPEnvironment()) { toast.error('Only works inside After Effects.'); return null; }
+  const bare = seedHex.replace(/^#/, '').toUpperCase();
+  const result = await evalScript(`pickColorViaAe(${lit(bare)})`);
+  if (typeof result === 'string' && result.indexOf('Error:') === 0) { toast.error(result.slice(6).trim()); return null; }
+  if (typeof result === 'string' && result.indexOf('Warning:') === 0) return null; // cancelled — stay quiet
+  const hex = String(result).trim();
+  if (!/^[0-9A-Fa-f]{6}$/.test(hex)) return null;
+  return '#' + hex.toUpperCase();
+};
+
 // Parse a host result that is either "Error:"/"Warning:" or a JSON hex array.
 // `quiet` suppresses the "warning" toast (used for silent existence probes).
 const parseHexArrayResult = (result: string, quiet = false): string[] | null => {

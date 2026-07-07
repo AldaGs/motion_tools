@@ -1,7 +1,7 @@
 // MTAG Switch — wire schema. Bumped in unison with breaking changes.
 export const SCHEMA_VERSION = 1 as const;
 
-export type PeerKind = 'ai' | 'ae' | 'color';
+export type PeerKind = 'ai' | 'ae' | 'ps' | 'color';
 
 export type MessageType =
   | 'hello'
@@ -115,12 +115,27 @@ export interface TextItem {
   fontSize: number;
   justification: 'left' | 'center' | 'right';
   bbox: { x: number; y: number; w: number; h: number };
+  aiAnchor?: [number, number];
   opacity: number;                              // 0..1 (object-level)
   blendMode: BlendMode;
   appearance: { fills: Paint[]; strokes: Stroke[]; shadows?: Shadow[] };
 }
 
-export type AnyItem = PathItem | TextItem;
+// Placed (linked) or rasterized/embedded Illustrator image. The exporter
+// resolves it to a file on disk — `sourcePath` — that the AE side imports as
+// footage. `linked` distinguishes a referenced source file (PlacedItem) from a
+// temp PNG extracted from an embedded raster.
+export interface ImageItem {
+  kind: 'image';
+  name: string;
+  bbox: { x: number; y: number; w: number; h: number };
+  sourcePath: string;
+  linked: boolean;
+  opacity: number;                              // 0..1 (object-level)
+  blendMode: BlendMode;
+}
+
+export type AnyItem = PathItem | TextItem | ImageItem;
 
 export interface ArtworkPayload {
   origin: {
@@ -135,6 +150,9 @@ export interface ArtworkPayload {
     grouped: boolean;
     centerAnchor: boolean;
   };
+  // Names/types of selected objects the exporter couldn't handle (e.g. mesh,
+  // symbol, graph). Surfaced in the panel log so drops aren't silent.
+  skipped?: string[];
   items: AnyItem[];
 }
 

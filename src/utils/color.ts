@@ -69,6 +69,62 @@ export const hslToRgb = (h: number, s: number, l: number): { r: number; g: numbe
   return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255 };
 };
 
+// ---------------- Format helpers (display + copy) --------------------------
+// Human-readable / paste-ready renderings of a hex color. `ae` is the
+// normalized 0–1 RGB triple After Effects expressions expect (e.g. a Fill
+// effect's Color property).
+
+export const formatRgb = (hex: string): string => {
+  const c = hexToRgb(hex);
+  return c ? `rgb(${c.r}, ${c.g}, ${c.b})` : hex;
+};
+
+export const formatHsl = (hex: string): string => {
+  const c = hexToHsl(hex);
+  return c ? `hsl(${Math.round(c.h)}, ${Math.round(c.s)}%, ${Math.round(c.l)}%)` : hex;
+};
+
+export const formatAeRgb = (hex: string): string => {
+  const c = hexToRgb(hex);
+  if (!c) return hex;
+  const n = (v: number) => (v / 255).toFixed(3);
+  return `[${n(c.r)}, ${n(c.g)}, ${n(c.b)}]`;
+};
+
+// ---------------- WCAG contrast --------------------------------------------
+// Relative luminance per WCAG 2.1, then the (L1+0.05)/(L2+0.05) contrast ratio.
+
+export const relativeLuminance = (hex: string): number => {
+  const c = hexToRgb(hex);
+  if (!c) return 0;
+  const lin = (v: number) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b);
+};
+
+export const contrastRatio = (hex1: string, hex2: string): number => {
+  const l1 = relativeLuminance(hex1);
+  const l2 = relativeLuminance(hex2);
+  const [hi, lo] = l1 >= l2 ? [l1, l2] : [l2, l1];
+  return (hi + 0.05) / (lo + 0.05);
+};
+
+// WCAG pass levels for a given ratio. Normal text needs 4.5 (AA) / 7 (AAA);
+// large text (≥18pt or 14pt bold) needs 3 (AA) / 4.5 (AAA).
+export interface WcagResult { ratio: number; normalAA: boolean; normalAAA: boolean; largeAA: boolean; largeAAA: boolean }
+export const wcagLevels = (hex1: string, hex2: string): WcagResult => {
+  const ratio = contrastRatio(hex1, hex2);
+  return {
+    ratio,
+    normalAA: ratio >= 4.5,
+    normalAAA: ratio >= 7,
+    largeAA: ratio >= 3,
+    largeAAA: ratio >= 4.5,
+  };
+};
+
 export type HarmonyKey =
   | 'complementary'
   | 'analogous'
@@ -77,6 +133,8 @@ export type HarmonyKey =
   | 'square'
   | 'compound'
   | 'monochromatic'
+  | 'tints'
+  | 'tones'
   | 'shades';
 
 export interface Harmony {
@@ -105,6 +163,8 @@ const LABELS: Record<HarmonyKey, string> = {
   square: 'Square',
   compound: 'Compound',
   monochromatic: 'Monochromatic',
+  tints: 'Tints',
+  tones: 'Tones',
   shades: 'Shades',
 };
 
@@ -119,6 +179,14 @@ export const buildHarmony = (base: HSL, key: HarmonyKey): Harmony => {
       s: clamp(base.s, 0, 100),
       l: clamp(base.l + dl, 8, 96),
     }));
+  } else if (key === 'tints') {
+    // Same hue/sat, walk lightness up toward white (base color + white).
+    const ls = [base.l, 60, 72, 84, 94];
+    colors = ls.map((l) => ({ h: base.h, s: base.s, l: clamp(l, 4, 96) }));
+  } else if (key === 'tones') {
+    // Same hue/lightness, drain saturation toward gray (base color + gray).
+    const fracs = [1, 0.75, 0.5, 0.25, 0.1];
+    colors = fracs.map((f) => ({ h: base.h, s: clamp(base.s * f, 0, 100), l: base.l }));
   } else if (key === 'shades') {
     // Same hue/sat, walk lightness down toward black.
     const ls = [72, 58, 44, 30, 16];
@@ -138,6 +206,8 @@ export const ALL_HARMONIES: HarmonyKey[] = [
   'square',
   'compound',
   'monochromatic',
+  'tints',
+  'tones',
   'shades',
 ];
 
