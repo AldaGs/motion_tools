@@ -441,8 +441,11 @@ function _mtagExportItemToPng(item, outPath) {
 // PathItem (the appearance-stack / multiple-fills API is not scriptable). So
 // `fills`/`strokes` arrays hold at most one entry each here; the schema keeps
 // them as arrays for forward-compat and because the AE side can emit stacks.
-function mtagSwitchAiExport(grouped, centerAnchor) {
+function mtagSwitchAiExport(grouped, centerAnchor, parametric) {
     try {
+        // Default ON: recognised rectangles/ellipses/polygons/stars go over as
+        // live AE parametric shapes. Pass false to force raw bezier paths.
+        var emitParametric = (parametric !== false);
         if (!app.documents || app.documents.length === 0) {
             return _mtagErr("No open document.");
         }
@@ -488,6 +491,98 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                 subs.push({ closed: !!pth.closed, vertices: verts, inTangents: ins, outTangents: outs });
             }
             return subs;
+        }
+
+        // Recognise a single closed subpath as an axis-aligned rectangle,
+        // ellipse, or regular polygon/star, returning an AE-space parametric
+        // descriptor (see schema ParametricShape) or null. Works purely on the
+        // AE-space subpaths + bbox, so no coordinate math is duplicated. Any
+        // ambiguity → null, and the caller keeps the exact bezier path (safe).
+        function detectShape(subpaths, bbox) {
+            if (!subpaths || subpaths.length !== 1) return null;
+            var sp = subpaths[0];
+            if (!sp.closed) return null;
+            var v = sp.vertices, itn = sp.inTangents, otn = sp.outTangents;
+            var n = v.length;
+            if (n < 2) return null;
+
+            var EPS = Math.max(bbox.w, bbox.h) * 0.01 + 0.75;  // px tolerance
+            function zeroT(t) { return Math.abs(t[0]) < EPS && Math.abs(t[1]) < EPS; }
+            function allStraight() {
+                for (var i = 0; i < n; i++) { if (!zeroT(itn[i]) || !zeroT(otn[i])) return false; }
+                return true;
+            }
+            var cx = bbox.x + bbox.w / 2, cy = bbox.y + bbox.h / 2;
+
+            // Rectangle: 4 straight corners, every edge axis-aligned.
+            if (n === 4 && allStraight()) {
+                var axis = true;
+                for (var e = 0; e < 4; e++) {
+                    var a = v[e], b = v[(e + 1) % 4];
+                    if (Math.abs(a[0] - b[0]) > EPS && Math.abs(a[1] - b[1]) > EPS) { axis = false; break; }
+                }
+                if (axis) return { type: "rect", center: [cx, cy], size: [bbox.w, bbox.h], roundness: 0 };
+            }
+
+            // Ellipse: 4 curved vertices sitting at the mid-point of each edge.
+            if (n === 4 && !allStraight()) {
+                var onMid = 0;
+                for (var m = 0; m < 4; m++) {
+                    var p = v[m];
+                    var atTB = Math.abs(p[0] - cx) < EPS &&
+                        (Math.abs(p[1] - bbox.y) < EPS || Math.abs(p[1] - (bbox.y + bbox.h)) < EPS);
+                    var atLR = Math.abs(p[1] - cy) < EPS &&
+                        (Math.abs(p[0] - bbox.x) < EPS || Math.abs(p[0] - (bbox.x + bbox.w)) < EPS);
+                    if (atTB || atLR) onMid++;
+                }
+                if (onMid === 4) return { type: "ellipse", center: [cx, cy], size: [bbox.w, bbox.h] };
+            }
+
+            // Regular polygon / star: straight edges, vertices radially regular
+            // about the centroid with even angular spacing.
+            if (n >= 6 && allStraight()) {
+                var gx = 0, gy = 0;
+                for (var c = 0; c < n; c++) { gx += v[c][0]; gy += v[c][1]; }
+                gx /= n; gy /= n;
+                var radii = [], angs = [];
+                for (var r = 0; r < n; r++) {
+                    var dx = v[r][0] - gx, dy = v[r][1] - gy;
+                    radii.push(Math.sqrt(dx * dx + dy * dy));
+                    angs.push(Math.atan2(dx, -dy));   // 0 = up, CW+ (AE convention)
+                }
+                var RTOL = Math.max(bbox.w, bbox.h) * 0.02 + 0.5;
+                function eq(a, b) { return Math.abs(a - b) <= RTOL; }
+                function evenlySpaced(step) {
+                    for (var i = 0; i < n; i++) {
+                        var d = angs[i] - (angs[0] + i * step);
+                        while (d > Math.PI) d -= 2 * Math.PI;
+                        while (d < -Math.PI) d += 2 * Math.PI;
+                        if (Math.abs(d) > 0.06) return false;
+                    }
+                    return true;
+                }
+                // Polygon: all radii equal.
+                var allEq = true;
+                for (var q = 1; q < n; q++) { if (!eq(radii[q], radii[0])) { allEq = false; break; } }
+                if (allEq && evenlySpaced(Math.PI * 2 / n)) {
+                    return { type: "polystar", star: false, points: n, center: [gx, gy],
+                             rotation: angs[0] * 180 / Math.PI, outerRadius: radii[0], outerRoundness: 0 };
+                }
+                // Star: even vertex count, alternating outer/inner radii, first
+                // vertex on the outer ring.
+                if (n % 2 === 0) {
+                    var outR = radii[0], inR = radii[1], ok = true;
+                    for (var s2 = 0; s2 < n; s2++) {
+                        if (!eq(radii[s2], (s2 % 2 === 0) ? outR : inR)) { ok = false; break; }
+                    }
+                    if (ok && outR > inR && evenlySpaced(Math.PI * 2 / n)) {
+                        return { type: "polystar", star: true, points: n / 2, center: [gx, gy],
+                                 rotation: angs[0] * 180 / Math.PI, outerRadius: outR, innerRadius: inR,
+                                 outerRoundness: 0, innerRoundness: 0 };
+                    }
+                }
+            }
+            return null;
         }
 
         // Pattern fills/strokes come through as a flat gray placeholder (see
@@ -730,13 +825,21 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                 // would fill them. Plain paths stay nonzero.
                 var fillRule = (item.typename === "CompoundPathItem") ? "even-odd" : "nonzero";
 
+                // Try to send a live parametric primitive (compound paths are
+                // never single primitives, so skip them). subpaths still ride
+                // along as the fallback.
+                var shape = null;
+                if (emitParametric && item.typename !== "CompoundPathItem") {
+                    try { shape = detectShape(subpaths, bbox); } catch (eSh) { shape = null; }
+                }
+
                 return {
                     kind: "path",
                     name: name,
                     bbox: bbox,
                     opacity: objOpacity,
                     blendMode: blend,
-                    geometry: { subpaths: subpaths, fillRule: fillRule },
+                    geometry: { subpaths: subpaths, fillRule: fillRule, shape: shape },
                     appearance: { fills: fills, strokes: strokes }
                 };
             }
@@ -1349,6 +1452,42 @@ function _mtagAddFill(groupContents, paint, shapeLayer) {
     return warnings;
 }
 
+// Build a live parametric shape (Rect/Ellipse/Polystar) inside a vector group
+// from a ParametricShape descriptor. Position is the shape's absolute comp
+// center (layers sit at [0,0], matching the baked-path convention). Returns
+// true if the shape prop was created, false to fall back to the bezier path.
+// Note: AE's real matchNames misspell roundness as "Roundess" — intentional.
+function _mtagAddParametricShape(groupContents, shape) {
+    if (shape.type === "rect") {
+        var rc = groupContents.addProperty("ADBE Vector Shape - Rect");
+        try { rc.property("ADBE Vector Rect Size").setValue(shape.size); } catch (e1) {}
+        try { rc.property("ADBE Vector Rect Position").setValue(shape.center); } catch (e2) {}
+        try { if (shape.roundness) rc.property("ADBE Vector Rect Roundness").setValue(shape.roundness); } catch (e3) {}
+        return true;
+    }
+    if (shape.type === "ellipse") {
+        var el = groupContents.addProperty("ADBE Vector Shape - Ellipse");
+        try { el.property("ADBE Vector Ellipse Size").setValue(shape.size); } catch (e4) {}
+        try { el.property("ADBE Vector Ellipse Position").setValue(shape.center); } catch (e5) {}
+        return true;
+    }
+    if (shape.type === "polystar") {
+        var st = groupContents.addProperty("ADBE Vector Shape - Star");
+        try { st.property("ADBE Vector Star Type").setValue(shape.star ? 1 : 2); } catch (e6) {}  // 1=star, 2=polygon
+        try { st.property("ADBE Vector Star Points").setValue(shape.points); } catch (e7) {}
+        try { st.property("ADBE Vector Star Position").setValue(shape.center); } catch (e8) {}
+        try { st.property("ADBE Vector Star Rotation").setValue(shape.rotation || 0); } catch (e9) {}
+        try { st.property("ADBE Vector Star Outer Radius").setValue(shape.outerRadius); } catch (e10) {}
+        try { if (shape.outerRoundness != null) st.property("ADBE Vector Star Outer Roundess").setValue(shape.outerRoundness); } catch (e11) {}
+        if (shape.star) {
+            try { st.property("ADBE Vector Star Inner Radius").setValue(shape.innerRadius); } catch (e12) {}
+            try { if (shape.innerRoundness != null) st.property("ADBE Vector Star Inner Roundess").setValue(shape.innerRoundness); } catch (e13) {}
+        }
+        return true;
+    }
+    return false;
+}
+
 // Add a stroke operator (solid or gradient) with width/cap/join/miter/dashes.
 function _mtagAddStroke(groupContents, stroke, shapeLayer) {
     var warnings = [];
@@ -1809,7 +1948,14 @@ function mtagSwitchAeImport(jsonString) {
                 group.name = item.name || "Path Group";
                 var groupContents = group.property("Contents");
                 
-                if (geom && geom.subpaths) {
+                var madeShape = false;
+                if (geom && geom.shape) {
+                    // Live parametric primitive (Rect/Ellipse/Polystar). Falls
+                    // back to the bezier subpaths if the prop can't be created.
+                    try { madeShape = _mtagAddParametricShape(groupContents, geom.shape); } catch (ePs) { madeShape = false; }
+                    if (!madeShape) warnings.push("shape '" + (item.name || "path") + "' → path (parametric build failed)");
+                }
+                if (!madeShape && geom && geom.subpaths) {
                     for (var i = 0; i < geom.subpaths.length; i++) {
                         var sp = geom.subpaths[i];
                         var pathProp = groupContents.addProperty("ADBE Vector Shape - Group");

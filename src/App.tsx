@@ -10,6 +10,7 @@ import MotionColor from './MotionColor';
 import MotionGifs from './MotionGifs';
 import MotionGifsSettings from './MotionGifsSettings';
 import MtagSwitch from './MtagSwitch';
+import MtagCloud from './MtagCloud';
 import CommandPalette from './components/CommandPalette';
 import ContextMenu, { type ContextMenuItem } from './components/ContextMenu';
 import Toaster from './components/Toaster';
@@ -72,7 +73,7 @@ function App() {
   // Exact match against the IDs registered in CSXS/manifest.xml — a loose
   // substring would mis-route any future panel whose ID contained the words
   // "easing" or "dialog".
-  const view: 'macros' | 'easing' | 'dialog' | 'color' | 'gifs' | 'gifsettings' | 'switch' = (() => {
+  const view: 'macros' | 'easing' | 'dialog' | 'color' | 'gifs' | 'gifsettings' | 'switch' | 'cloud' = (() => {
     if (typeof window.__adobe_cep__ !== 'undefined') {
       const extId = window.__adobe_cep__.getExtensionId();
       if (extId === 'com.motiontoolbar.panel.easing') return 'easing';
@@ -86,6 +87,7 @@ function App() {
       if (extId === 'com.motiontoolbar.panel.gifs') return 'gifs';
       if (extId === 'com.motiontoolbar.panel.gifsettings') return 'gifsettings';
       if (extId === 'com.motiontoolbar.panel.switch') return 'switch';
+      if (extId === 'com.motiontoolbar.panel.cloud') return 'cloud';
     }
     return 'macros';
   })();
@@ -572,6 +574,15 @@ function App() {
     return (
       <>
         <MtagSwitch />
+        <Toaster />
+      </>
+    );
+  }
+
+  if (view === 'cloud') {
+    return (
+      <>
+        <MtagCloud />
         <Toaster />
       </>
     );

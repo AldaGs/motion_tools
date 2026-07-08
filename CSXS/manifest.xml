@@ -12,6 +12,7 @@
     <Extension Id="com.motiontoolbar.panel.dialog" Version="1.0.0" />
     <Extension Id="com.motiontoolbar.panel.toolbarsettings" Version="1.0.0" />
     <Extension Id="com.motiontoolbar.panel.easingsettings" Version="1.0.0" />
+    <Extension Id="com.motiontoolbar.panel.cloud" Version="1.0.0" />
   </ExtensionList>
   
   <ExecutionEnvironment>
@@ -242,6 +243,32 @@
           <Geometry>
             <Size><Height>620</Height><Width>340</Width></Size>
             <MinSize><Height>360</Height><Width>280</Width></MinSize>
+          </Geometry>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+
+    <!-- Shared "MTAG Cloud" panel: Google Drive sign-in + backup/restore for
+         every panel. Registered on AE and Illustrator so the whole suite reaches
+         one dashboard. AutoVisible so it opens from the Window menu. -->
+    <Extension Id="com.motiontoolbar.panel.cloud">
+      <HostList><Host Name="AEFT" /><Host Name="ILST" /></HostList>
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./dist/index.html</MainPath>
+          <ScriptPath>./jsx/hostscript.jsx</ScriptPath>
+          <CEFCommandLine>
+            <Parameter>--enable-nodejs</Parameter>
+            <Parameter>--allow-file-access</Parameter>
+          </CEFCommandLine>
+        </Resources>
+        <Lifecycle><AutoVisible>true</AutoVisible></Lifecycle>
+        <UI>
+          <Type>Panel</Type>
+          <Menu>MTAG Cloud</Menu>
+          <Geometry>
+            <Size><Height>560</Height><Width>340</Width></Size>
+            <MinSize><Height>320</Height><Width>280</Width></MinSize>
           </Geometry>
         </UI>
       </DispatchInfo>

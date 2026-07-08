@@ -1,6 +1,7 @@
 // src/utils/storage.ts
 
 import type { AppData, CustomEase } from '../types';
+import { scheduleAutoPush } from '../cloud/autoSync';
 
 declare global {
   interface Window {
@@ -450,6 +451,10 @@ export const saveConfig = (data: AppData) => {
 
     writeAtomic(macrosPath, JSON.stringify(macroFile, null, 2));
     writeAtomic(easingPath, JSON.stringify(easingFile, null, 2));
+    // This single call persists both the toolbar (macros) and eases (easing)
+    // backup files, so queue a background push for each.
+    scheduleAutoPush('toolbar');
+    scheduleAutoPush('eases');
   } catch (err) {
     console.error("Failed to save config.", err);
   }
@@ -497,6 +502,7 @@ export const saveColorState = (state: { hex: string; harmony?: string; showAll?:
     if (configPath) {
       const statePath = path.join(path.dirname(configPath), 'colorState.json');
       fs.writeFileSync(statePath, JSON.stringify(state), 'utf8');
+      scheduleAutoPush('color');
     }
   } catch (e) { }
 };
@@ -526,6 +532,7 @@ export const savePaletteWorkingState = (state: { name: string; colors: string[] 
     if (configPath) {
       const statePath = path.join(path.dirname(configPath), 'paletteState.json');
       fs.writeFileSync(statePath, JSON.stringify(state), 'utf8');
+      scheduleAutoPush('color');
     }
   } catch (e) { }
 };
@@ -575,6 +582,7 @@ export const saveColorSettings = (settings: ColorSettings) => {
     if (configPath) {
       const p = path.join(path.dirname(configPath), 'colorSettings.json');
       fs.writeFileSync(p, JSON.stringify(settings), 'utf8');
+      scheduleAutoPush('color');
     }
   } catch (e) { }
 };
@@ -584,6 +592,7 @@ export const saveColorSettings = (settings: ColorSettings) => {
 // edits this file. Persisted independently in gifSettings.json.
 export interface GifSettings {
   templateIndex: number;
+  outputFormat: 'gif' | 'webm' | 'apng';  // final container: GIF (gifski), WebM VP9, or animated PNG
   outputDir: string;
   sizeMode: 'comp' | 'custom';   // 'comp' = keep the comp's width
   width: number;
@@ -599,6 +608,7 @@ export interface GifSettings {
 
 const GIF_SETTINGS_DEFAULTS: GifSettings = {
   templateIndex: 0,
+  outputFormat: 'gif',
   outputDir: '',
   sizeMode: 'comp',
   width: 540,
@@ -636,6 +646,7 @@ export const saveGifSettings = (settings: GifSettings) => {
     if (configPath) {
       const p = path.join(path.dirname(configPath), 'gifSettings.json');
       fs.writeFileSync(p, JSON.stringify(settings), 'utf8');
+      scheduleAutoPush('gifs');
     }
   } catch (e) { }
 };
@@ -647,9 +658,10 @@ export const saveGifSettings = (settings: GifSettings) => {
 export interface SwitchSettings {
   grouped: boolean;       // import all items into one layer vs. one layer each
   centerAnchor: boolean;  // center the anchor point of the imported layer(s)
+  parametric: boolean;    // send recognised primitives as live AE shapes vs. raw paths
 }
 
-const SWITCH_SETTINGS_DEFAULTS: SwitchSettings = { grouped: true, centerAnchor: false };
+const SWITCH_SETTINGS_DEFAULTS: SwitchSettings = { grouped: true, centerAnchor: false, parametric: true };
 
 export const loadSwitchSettings = (): SwitchSettings => {
   try {
@@ -663,6 +675,7 @@ export const loadSwitchSettings = (): SwitchSettings => {
         return {
           grouped: typeof parsed?.grouped === 'boolean' ? parsed.grouped : SWITCH_SETTINGS_DEFAULTS.grouped,
           centerAnchor: typeof parsed?.centerAnchor === 'boolean' ? parsed.centerAnchor : SWITCH_SETTINGS_DEFAULTS.centerAnchor,
+          parametric: typeof parsed?.parametric === 'boolean' ? parsed.parametric : SWITCH_SETTINGS_DEFAULTS.parametric,
         };
       }
     }
@@ -678,6 +691,7 @@ export const saveSwitchSettings = (settings: SwitchSettings) => {
     if (configPath) {
       const p = path.join(path.dirname(configPath), 'switchSettings.json');
       fs.writeFileSync(p, JSON.stringify(settings), 'utf8');
+      scheduleAutoPush('switch');
     }
   } catch (e) { }
 };
@@ -738,6 +752,7 @@ export const savePalette = (palette: ColorPalette): boolean => {
     if (!dir) return false;
     const file = path.join(dir, paletteFileName(palette.name) + '.json');
     fs.writeFileSync(file, JSON.stringify({ name: palette.name, colors: palette.colors }, null, 2), 'utf8');
+    scheduleAutoPush('color');
     return true;
   } catch (e) { return false; }
 };
@@ -750,6 +765,7 @@ export const deletePalette = (name: string): boolean => {
     if (!dir) return false;
     const file = path.join(dir, paletteFileName(name) + '.json');
     if (fs.existsSync(file)) fs.unlinkSync(file);
+    scheduleAutoPush('color');
     return true;
   } catch (e) { return false; }
 };
@@ -909,6 +925,7 @@ const saveColorHistory = (colors: string[]) => {
     if (!configPath) return;
     const p = path.join(path.dirname(configPath), 'colorHistory.json');
     fs.writeFileSync(p, JSON.stringify(colors.slice(0, HISTORY_MAX)), 'utf8');
+    scheduleAutoPush('color');
   } catch (e) { }
 };
 

@@ -8,6 +8,7 @@ import { useState } from 'react';
 import { evalScript } from './utils/adobe';
 import { loadGifSettings, saveGifSettings, type GifSettings } from './utils/storage';
 import { GIF_TEMPLATES } from './utils/gifExport';
+import { OpenCloudButton } from './components/OpenCloudButton';
 
 export default function MotionGifsSettings() {
   const [s, setS] = useState<GifSettings>(() => loadGifSettings());
@@ -31,13 +32,24 @@ export default function MotionGifsSettings() {
       {/* Hide the scrollbar chrome; scrolling still works if the panel is
           resized below the content height. */}
       <style>{`.mg-settings{scrollbar-width:none;-ms-overflow-style:none;}.mg-settings::-webkit-scrollbar{width:0;height:0;display:none;}`}</style>
-      <div style={{ fontWeight: 700, fontSize: 13 }}>Motion GIFS — Settings</div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ fontWeight: 700, fontSize: 13, flex: 1 }}>Motion GIFS — Settings</div>
+        <OpenCloudButton />
+      </div>
 
       <Field label="Template">
         <select value={s.templateIndex} onChange={(e) => set('templateIndex', +e.target.value)} style={input}>
           {GIF_TEMPLATES.map((t, i) => (
             <option key={i} value={i} style={{ background: 'var(--panel-bg-elev)' }}>{t.label}</option>
           ))}
+        </select>
+      </Field>
+
+      <Field label="Output format">
+        <select value={s.outputFormat} onChange={(e) => set('outputFormat', e.target.value as GifSettings['outputFormat'])} style={input}>
+          <option value="gif" style={{ background: 'var(--panel-bg-elev)' }}>GIF</option>
+          <option value="webm" style={{ background: 'var(--panel-bg-elev)' }}>WebM (VP9, alpha)</option>
+          <option value="apng" style={{ background: 'var(--panel-bg-elev)' }}>APNG (animated PNG, alpha)</option>
         </select>
       </Field>
 

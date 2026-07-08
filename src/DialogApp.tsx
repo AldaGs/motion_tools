@@ -9,6 +9,7 @@ import { toast } from './utils/toast';
 import { formatHotkey } from './utils/hotkey';
 import { parseEasingFile, mergeEasesUnique } from './utils/easingImport';
 import COMMAND_IDS from './utils/2025.json';
+import { OpenCloudButton } from './components/OpenCloudButton';
 
 const CONTEXT_LABELS: Record<ProfileContext, string> = {
   none: 'Default / Fallback',
@@ -794,9 +795,12 @@ export default function DialogApp() {
 
         {dialogMode === 'settings' && (
           <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '15px', fontSize: '12px' }}>
-            <h4 style={{ margin: 0, fontSize: '14px', color: 'var(--panel-fg)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '8px' }}>
-              {SETTINGS_SCOPE === 'toolbar' ? 'Toolbar Settings' : SETTINGS_SCOPE === 'easing' ? 'Easing Settings' : 'Settings'}
-            </h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, borderBottom: '1px solid var(--panel-border)', paddingBottom: '8px' }}>
+              <h4 style={{ margin: 0, fontSize: '14px', color: 'var(--panel-fg)', flex: 1 }}>
+                {SETTINGS_SCOPE === 'toolbar' ? 'Toolbar Settings' : SETTINGS_SCOPE === 'easing' ? 'Easing Settings' : 'Settings'}
+              </h4>
+              <OpenCloudButton />
+            </div>
 
             {/* ===== TOOLBAR (macros) SETTINGS ===== */}
             {SETTINGS_SCOPE !== 'easing' && (<>

@@ -37,19 +37,28 @@ export const GIF_TEMPLATES = [
   { label: 'ProRes 422 · RGB', mode: 'prores' as const },
 ];
 
+export type OutputFormat = 'gif' | 'webm' | 'apng';
+
+/** File extension for a given output format. */
+export const outputExtForFormat = (fmt: OutputFormat): string =>
+  fmt === 'webm' ? 'webm' : fmt === 'apng' ? 'apng' : 'gif';
+
 export interface EncodeOptions {
-  /** Destination .gif path. */
+  /** Destination path (extension should match `format`). */
   output: string;
-  /** Output width in px; height derived to keep aspect (-1). */
+  /** Output width in px; height derived to keep aspect. */
   width: number;
   /** Output frame rate. */
   fps: number;
-  /** gifski quality 1–100. */
+  /** gifski quality 1–100 (also mapped to a VP9 CRF for WebM). */
   quality: number;
-  /** gifski --repeat: 0 = loop forever, -1 = no loop, n = n times. */
+  /** Loop: 0 = loop forever, -1 = no loop, n = n times. GIF (gifski --repeat)
+   *  and APNG (-plays) honor this; WebM has no loop metadata (players loop). */
   loop?: number;
   /** Keep intermediate frames on disk after encoding. */
   keepFrames?: boolean;
+  /** Final container. Defaults to 'gif' when unset. */
+  format?: OutputFormat;
 }
 
 /** Result the host script returns from giphPrepareBackgroundRender(). */
@@ -341,6 +350,88 @@ const gifskiEncode = (
   });
 };
 
+// ffmpeg: encode a sorted list of PNG frames into a WebM (VP9) or animated PNG.
+// Uses a concat demuxer script (one entry per frame at a fixed duration) so it
+// works regardless of the frames' zero-pad width or naming. Reports progress
+// mapped into [weightStart, weightStart+weightSpan] off ffmpeg's `frame=` count.
+const ffmpegEncodeFrames = (
+  ffmpeg: string,
+  frames: string[],
+  opts: EncodeOptions,
+  weightStart: number,
+  weightSpan: number,
+  onProgress: (p: GifProgress) => void,
+): Promise<void> => {
+  const { spawn } = window.require('child_process');
+  const fs = window.require('fs');
+  const path = window.require('path');
+  const format = opts.format === 'webm' ? 'webm' : 'apng';
+
+  return new Promise((resolve, reject) => {
+    if (frames.length === 0) return reject(new Error('No frames were rendered.'));
+
+    // concat script: forward-slash paths (ffmpeg accepts them on Windows and
+    // they avoid backslash-escaping headaches). The last frame is listed twice
+    // so its `duration` line takes effect.
+    const dur = (1 / opts.fps).toFixed(6);
+    const esc = (f: string) => f.replace(/\\/g, '/').replace(/'/g, "'\\''");
+    let list = 'ffconcat version 1.0\n';
+    for (const f of frames) list += `file '${esc(f)}'\nduration ${dur}\n`;
+    list += `file '${esc(frames[frames.length - 1])}'\n`;
+
+    const listPath = path.join(path.dirname(frames[0]), 'ffconcat.txt');
+    try { fs.writeFileSync(listPath, list, 'utf8'); } catch (e) { return reject(e as Error); }
+
+    let codec: string[];
+    let vf: string;
+    if (format === 'webm') {
+      // VP9 with alpha. `-2` keeps aspect while forcing an even height (VP9
+      // requires it). CRF from quality: 100 → 0 (best), 1 → ~62.
+      const crf = Math.max(0, Math.min(63, Math.round(63 - (opts.quality / 100) * 63)));
+      vf = `scale=${opts.width}:-2:flags=lanczos`;
+      codec = ['-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', String(crf), '-an'];
+    } else {
+      // Animated PNG — lossless, native alpha. plays: 0 = infinite, else once.
+      const plays = opts.loop === 0 ? 0 : 1;
+      vf = `scale=${opts.width}:-1:flags=lanczos`;
+      codec = ['-c:v', 'apng', '-pix_fmt', 'rgba', '-plays', String(plays), '-f', 'apng'];
+    }
+
+    const args = ['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-vf', vf, '-r', String(opts.fps), ...codec, opts.output];
+    const proc = spawn(ffmpeg, args);
+    let tail = '';
+    proc.stderr.on('data', (buf: any) => {
+      const text = String(buf);
+      tail = (tail + text).slice(-3000);
+      const m = text.match(/frame=\s*(\d+)/g);
+      if (m) {
+        const n = parseInt(m[m.length - 1].replace(/\D/g, ''), 10);
+        const done = Math.min(1, n / frames.length);
+        onProgress({ phase: 'encode', percent: Math.round((weightStart + done * weightSpan) * 100), message: `Encoding ${format.toUpperCase()}… ${Math.round(done * 100)}%` });
+      }
+    });
+    proc.on('error', reject);
+    proc.on('close', (code: number) => {
+      try { fs.unlinkSync(listPath); } catch { /* ignore */ }
+      code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}\n${tail}`));
+    });
+  });
+};
+
+// Encode a sorted PNG sequence into the requested container: GIF → gifski,
+// WebM/APNG → ffmpeg. Shared by every pipeline below.
+const encodeFrames = (
+  bins: GifBinaries,
+  frames: string[],
+  opts: EncodeOptions,
+  weightStart: number,
+  weightSpan: number,
+  onProgress: (p: GifProgress) => void,
+): Promise<void> =>
+  (opts.format === 'webm' || opts.format === 'apng')
+    ? ffmpegEncodeFrames(bins.ffmpeg, frames, opts, weightStart, weightSpan, onProgress)
+    : gifskiEncode(bins.gifski, frames, opts, weightStart, weightSpan, onProgress);
+
 // Collect a sorted PNG sequence AE wrote as `${prefix}_00000.png`, `_00001`, …
 const collectSequence = (folder: string, prefix: string): string[] => {
   const fs = window.require('fs');
@@ -399,8 +490,8 @@ export const encodeRenderToGif = (
     // AE already produced the frames; gifski owns the entire bar.
     const prefix = path.basename(render.base);
     const frames = collectSequence(render.folder, prefix);
-    onProgress({ phase: 'encode', percent: 0, message: 'Encoding GIF…' });
-    return gifskiEncode(bins.gifski, frames, opts, 0, 1, onProgress).then(finish).catch(fail);
+    onProgress({ phase: 'encode', percent: 0, message: 'Encoding…' });
+    return encodeFrames(bins, frames, opts, 0, 1, onProgress).then(finish).catch(fail);
   }
 
   // ProRes: extract frames with ffmpeg, then encode.
@@ -409,7 +500,7 @@ export const encodeRenderToGif = (
   return ffmpegExtract(bins.ffmpeg, `${render.base}.mov`, framePattern, opts.width, opts.fps, EXTRACT_WEIGHT, onProgress)
     .then(() => {
       const frames = collectSequence(render.folder, 'frame');
-      return gifskiEncode(bins.gifski, frames, opts, EXTRACT_WEIGHT, 1 - EXTRACT_WEIGHT, onProgress);
+      return encodeFrames(bins, frames, opts, EXTRACT_WEIGHT, 1 - EXTRACT_WEIGHT, onProgress);
     })
     .then(finish)
     .catch(fail);
@@ -437,7 +528,7 @@ export const convertVideoToGif = (
   return ffmpegExtract(bins.ffmpeg, input, framePattern, opts.width, opts.fps, EXTRACT_WEIGHT, onProgress)
     .then(() => {
       const frames = collectSequence(opts.tempDir, 'frame');
-      return gifskiEncode(bins.gifski, frames, opts, EXTRACT_WEIGHT, 1 - EXTRACT_WEIGHT, onProgress);
+      return encodeFrames(bins, frames, opts, EXTRACT_WEIGHT, 1 - EXTRACT_WEIGHT, onProgress);
     })
     .then(() => {
       cleanupFolder(opts.tempDir, opts.keepFrames);

@@ -90,13 +90,48 @@ export interface Stroke {
   dashOffset?: number;
 }
 
+// A recognised primitive, so AE can rebuild the object as a *live*, editable
+// parametric shape (Rect/Ellipse/Polystar) instead of a frozen bezier path.
+// All coordinates are already in AE comp space (px, y-down), matching SubPath.
+// The exporter still emits `subpaths` alongside this as a fallback for AE
+// versions / cases where the parametric prop can't be set.
+export interface RectShape {
+  type: 'rect';
+  center: [number, number];
+  size: [number, number];                       // [w, h]
+  roundness: number;                            // corner radius, px (0 = sharp)
+}
+export interface EllipseShape {
+  type: 'ellipse';
+  center: [number, number];
+  size: [number, number];                       // [w, h]
+}
+export interface PolyStarShape {
+  type: 'polystar';
+  star: boolean;                                // true = star, false = polygon
+  points: number;                               // AE "points" (star tips / poly sides)
+  center: [number, number];
+  rotation: number;                             // deg, 0 = first point up, CW+
+  outerRadius: number;
+  innerRadius?: number;                         // star only
+  outerRoundness?: number;                      // 0..100
+  innerRoundness?: number;                      // star only, 0..100
+}
+export type ParametricShape = RectShape | EllipseShape | PolyStarShape;
+
 export interface PathItem {
   kind: 'path';
   name: string;
   bbox: { x: number; y: number; w: number; h: number };
   opacity: number;                              // 0..1 (object-level)
   blendMode: BlendMode;
-  geometry: { subpaths: SubPath[]; fillRule: 'nonzero' | 'even-odd' };
+  geometry: {
+    subpaths: SubPath[];
+    fillRule: 'nonzero' | 'even-odd';
+    shape?: ParametricShape | null;             // present when the path was
+                                                // recognised as a primitive and
+                                                // the parametric toggle is on
+  };
   appearance: { fills: Paint[]; strokes: Stroke[] };
 }
 

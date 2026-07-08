@@ -790,6 +790,32 @@ function _giphComp() {
     return (comp && comp instanceof CompItem) ? comp : null;
 }
 
+// Resolve a comp by its stable project item id (used by batch export, where the
+// active comp isn't the one being rendered).
+function _giphCompById(id) {
+    for (var i = 1; i <= app.project.numItems; i++) {
+        var it = app.project.item(i);
+        if (it instanceof CompItem && it.id == id) return it;
+    }
+    return null;
+}
+
+// Return the comps currently selected in the Project panel, in selection order,
+// as [{ id, name }]. The panel loops over these and calls giphRenderComp with
+// each `compId` for Batch Comp Export.
+function giphSelectedComps() {
+    try {
+        var sel = app.project.selection;
+        var out = [];
+        for (var i = 0; i < sel.length; i++) {
+            if (sel[i] instanceof CompItem) out.push({ id: sel[i].id, name: sel[i].name });
+        }
+        return JSON.stringify({ ok: true, comps: out });
+    } catch (err) {
+        return JSON.stringify({ ok: false, error: err.toString() });
+    }
+}
+
 function _giphRenderQueue() {
     var rq = app.project.renderQueue;
     return (rq && rq instanceof RenderQueue) ? rq : null;
@@ -872,7 +898,9 @@ function _giphIncrementName(filePath, ext) {
 function giphRenderComp(optsJSON) {
     try {
         var opts = JSON.parse(optsJSON);
-        var comp = _giphComp();
+        // Batch export passes an explicit compId; the single-comp path uses the
+        // active comp.
+        var comp = (opts.compId != null) ? _giphCompById(opts.compId) : _giphComp();
         if (!comp) return JSON.stringify({ ok: false, error: "Open a composition first." });
 
         var idx = parseInt(opts.templateIndex);

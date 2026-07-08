@@ -11,6 +11,7 @@ import { exportPalette, importPalette } from './utils/paletteIO';
 import { FORMAT_LABELS, type ExportFormat } from './utils/colorFormats';
 import { toast } from './utils/toast';
 import FeatherIcon from './components/FeatherIcon';
+import { OpenCloudButton } from './components/OpenCloudButton';
 import './motionColor.css';
 
 type Tab = 'wheel' | 'palette';
@@ -268,6 +269,10 @@ export default function MotionColor() {
                 <button className="mc-iconbtn" onClick={handleImport} title="Import an ASE or JSON palette"
                   style={{ backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)' }}><FeatherIcon name="folder-plus" size={15} /></button>
               </div>
+
+              {/* Cloud backup */}
+              <div style={{ height: 1, backgroundColor: 'var(--panel-border)' }} />
+              <OpenCloudButton style={{ justifyContent: 'center' }} />
             </div>
           </>
         )}

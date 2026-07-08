@@ -11,7 +11,7 @@ import { evalScript, isCEPEnvironment } from './utils/adobe';
 import { loadGifSettings, type GifSettings } from './utils/storage';
 import {
   resolveBinaries, encodeRenderToGif, convertVideoToGif, probeVideo,
-  renderInBackground, revealFile, playFile, templateFilePath,
+  renderInBackground, revealFile, playFile, templateFilePath, outputExtForFormat,
   type GifBinaries, type RenderResult, type BackgroundRenderPrep,
 } from './utils/gifExport';
 import { toast } from './utils/toast';
@@ -119,7 +119,7 @@ export default function MotionGifs() {
 
       const width = s.sizeMode === 'comp' ? render.width : s.width;
       const fps = s.fpsMode === 'comp' ? Math.round(render.frameRate) : s.fps;
-      const output = path.join(s.outputDir, `${render.name}.gif`);
+      const output = path.join(s.outputDir, `${render.name}.${outputExtForFormat(s.outputFormat)}`);
 
       // When aerender took the first half, remap encode progress into 50–100%.
       const encodeProgress = encodeBase
@@ -128,13 +128,81 @@ export default function MotionGifs() {
 
       await encodeRenderToGif(
         render,
-        { output, width, fps, quality: s.quality, loop: s.loopForever ? 0 : -1, keepFrames: s.keepFrames },
+        { output, width, fps, quality: s.quality, loop: s.loopForever ? 0 : -1, keepFrames: s.keepFrames, format: s.outputFormat },
         encodeProgress,
       );
       afterExport(s, output);
     } catch (e: any) {
       console.error(e);
       toast.error(e?.message ? `Export failed — ${e.message.split('\n')[0]}` : 'Export failed.');
+    } finally {
+      end();
+    }
+  };
+
+  // Batch: render + encode every comp selected in the Project panel, one after
+  // another, into the output folder. Always uses the blocking render path (the
+  // background/aerender flow is single-comp only). One shared progress bar is
+  // split evenly across the comps.
+  const handleBatchExport = async () => {
+    const s = loadGifSettings();
+    if (!bins?.ok || runningRef.current || !s.outputDir) return;
+    const path = window.require('path');
+    const os = window.require('os');
+    const fs = window.require('fs');
+
+    let comps: Array<{ id: number; name: string }> = [];
+    try {
+      const parsed = JSON.parse(await evalScript('giphSelectedComps()'));
+      if (!parsed.ok) throw new Error(parsed.error || 'Could not read selection.');
+      comps = parsed.comps || [];
+    } catch (e: any) {
+      toast.error(e?.message ? `Batch failed — ${e.message}` : 'Batch failed.');
+      return;
+    }
+    if (comps.length === 0) {
+      toast.error('Select one or more comps in the Project panel first.');
+      return;
+    }
+
+    const total = comps.length;
+    const ext = outputExtForFormat(s.outputFormat);
+    begin(`Batch export — 0/${total}…`);
+    let lastOutput = '';
+    try {
+      for (let i = 0; i < total; i++) {
+        const c = comps[i];
+        const renderFolder = s.keepFrames
+          ? path.join(s.outputDir, 'GIPHERrender')
+          : path.join(os.tmpdir(), 'MotionGifs', `${Date.now()}_${i}`);
+        try { fs.mkdirSync(renderFolder, { recursive: true }); } catch { /* host will retry */ }
+
+        const req = JSON.stringify({ templateIndex: s.templateIndex, renderFolder, templateFile: templateFilePath(), compId: c.id });
+        setStatus(`(${i + 1}/${total}) Rendering ${c.name}…`);
+        let render: RenderResult;
+        const raw = await evalScript(`giphRenderComp(${JSON.stringify(req)})`);
+        try { render = JSON.parse(raw); }
+        catch { throw new Error(`Host render failed: ${raw}`); }
+        if (!render.ok) throw new Error(render.error || `Render failed for ${c.name}.`);
+
+        const width = s.sizeMode === 'comp' ? render.width : s.width;
+        const fps = s.fpsMode === 'comp' ? Math.round(render.frameRate) : s.fps;
+        lastOutput = path.join(s.outputDir, `${render.name}.${ext}`);
+
+        // Map this comp's 0–100 encode into its slice of the overall bar.
+        const sliceBase = (i / total) * 100;
+        await encodeRenderToGif(
+          render,
+          { output: lastOutput, width, fps, quality: s.quality, loop: s.loopForever ? 0 : -1, keepFrames: s.keepFrames, format: s.outputFormat },
+          (p) => onProgress({ percent: Math.round(sliceBase + p.percent / total), message: `(${i + 1}/${total}) ${p.message}` }),
+        );
+      }
+      setPercent(100);
+      if (s.openFolder && lastOutput) revealFile(lastOutput);
+      toast.info(`Batch export complete — ${total} file(s) in ${s.outputDir}`);
+    } catch (e: any) {
+      console.error(e);
+      toast.error(e?.message ? `Batch failed — ${e.message.split('\n')[0]}` : 'Batch failed.');
     } finally {
       end();
     }
@@ -160,12 +228,12 @@ export default function MotionGifs() {
       }
 
       const base = path.basename(res).replace(/\.[^.]+$/, '') || 'output';
-      const output = path.join(s.outputDir, `${base}.gif`);
+      const output = path.join(s.outputDir, `${base}.${outputExtForFormat(s.outputFormat)}`);
 
       setStatus('Starting…');
       await convertVideoToGif(
         res,
-        { output, width, fps, quality: s.quality, loop: s.loopForever ? 0 : -1, keepFrames: s.keepFrames, tempDir: tempFramesDir() },
+        { output, width, fps, quality: s.quality, loop: s.loopForever ? 0 : -1, keepFrames: s.keepFrames, format: s.outputFormat, tempDir: tempFramesDir() },
         onProgress,
       );
       afterExport(s, output);
@@ -208,6 +276,16 @@ export default function MotionGifs() {
             ⚙️
           </button>
         </div>
+
+        <button onClick={handleBatchExport} disabled={!ready}
+          title="Render every comp selected in the Project panel"
+          style={{
+            padding: '6px 8px', fontSize: 11, borderRadius: 4, border: '1px solid var(--panel-border)',
+            background: 'var(--panel-bg-elev)', color: 'var(--panel-fg)',
+            cursor: ready ? 'pointer' : 'not-allowed', opacity: ready ? 1 : 0.6,
+          }}>
+          Batch Export Selected Comps
+        </button>
 
         <button onClick={handleConvertVideo} disabled={!ready}
           style={{

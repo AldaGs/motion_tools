@@ -14,12 +14,16 @@ import LayersIcon from '@mui/icons-material/Layers';
 import LayersClearIcon from '@mui/icons-material/LayersClear';
 import FilterCenterFocusIcon from '@mui/icons-material/FilterCenterFocus';
 import CropFreeIcon from '@mui/icons-material/CropFree';
+import CategoryIcon from '@mui/icons-material/Category';
+import TimelineIcon from '@mui/icons-material/Timeline';
 import BugReportIcon from '@mui/icons-material/BugReport';
+import CloudQueueIcon from '@mui/icons-material/CloudQueue';
 import PaletteIcon from '@mui/icons-material/Palette';
 import FormatColorFillIcon from '@mui/icons-material/FormatColorFill';
 import BorderColorIcon from '@mui/icons-material/BorderColor';
 import { IconButton, Tooltip } from '@mui/material';
 import { saveAiColorClip, loadSwitchSettings, saveSwitchSettings } from './utils/storage';
+import { openCloudPanel } from './cloud/openCloudPanel';
 import { getHostTheme } from './utils/hostTheme';
 
 const CLIENT_VERSION = '0.2.0-poc';
@@ -90,6 +94,7 @@ export default function MtagSwitch() {
   const savedSwitch = useMemo(() => loadSwitchSettings(), []);
   const [grouped, setGrouped] = useState(savedSwitch.grouped);
   const [centerAnchor, setCenterAnchor] = useState(savedSwitch.centerAnchor);
+  const [parametric, setParametric] = useState(savedSwitch.parametric);
   const [lastPickInfo, setLastPickInfo] = useState<string | null>(null);
   // Per-project image export/import folder (AE side only). Stored inside the
   // .aep via the project's XMP packet, so it travels with the project file.
@@ -124,8 +129,8 @@ export default function MtagSwitch() {
   // Persist the toggle selection whenever it changes so the next panel open
   // restores it.
   useEffect(() => {
-    saveSwitchSettings({ grouped, centerAnchor });
-  }, [grouped, centerAnchor]);
+    saveSwitchSettings({ grouped, centerAnchor, parametric });
+  }, [grouped, centerAnchor, parametric]);
 
   useEffect(() => {
     let cancelled = false;
@@ -397,7 +402,7 @@ export default function MtagSwitch() {
     setLastResult(null);
     try {
       const exportFn = host === 'ps' ? 'mtagSwitchPsExport' : 'mtagSwitchAiExport';
-      const payload = await evalJsx<ArtworkPayload>(`${exportFn}(${grouped}, ${centerAnchor})`);
+      const payload = await evalJsx<ArtworkPayload>(`${exportFn}(${grouped}, ${centerAnchor}, ${parametric})`);
       if (payload.skipped && payload.skipped.length) {
         logErr(`skipped ${payload.skipped.length} unsupported item(s): ${payload.skipped.join(', ')}`);
       }
@@ -516,9 +521,23 @@ export default function MtagSwitch() {
                 </IconButton>
               </Tooltip>
 
-              {/* Diagnostics aligned to right */}
+              {host === 'ai' && (
+                <Tooltip title={parametric ? "Send live shapes (rect/ellipse/poly)" : "Send raw paths"} {...tooltipProps}>
+                  <IconButton onClick={() => setParametric(!parametric)} size="small" sx={toolSx(parametric)}>
+                    {parametric ? <CategoryIcon fontSize="small" /> : <TimelineIcon fontSize="small" />}
+                  </IconButton>
+                </Tooltip>
+              )}
+
+              {/* Cloud + Diagnostics aligned to right */}
+              <Tooltip title="MTAG Cloud backup" {...tooltipProps}>
+                <IconButton onClick={openCloudPanel} size="small" sx={{ ...toolSx(false), marginLeft: 'auto' }}>
+                  <CloudQueueIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+
               <Tooltip title="Toggle Diagnostics" {...tooltipProps}>
-                <IconButton onClick={() => setShowLogs(!showLogs)} size="small" sx={{ ...toolSx(showLogs), marginLeft: 'auto' }}>
+                <IconButton onClick={() => setShowLogs(!showLogs)} size="small" sx={toolSx(showLogs)}>
                   <BugReportIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
