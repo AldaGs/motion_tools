@@ -133,6 +133,31 @@ button:active:not(:disabled) {
   color: #fff;
 }
 
+.mt-tile-badge.is-unlink {
+  bottom: -7px;
+  left: -7px;
+  width: 16px;
+  height: 16px;
+  font-size: 9px;
+  background-color: var(--panel-bg);
+  color: var(--panel-fg);
+}
+
+/* Passive linked indicator shown outside edit mode. */
+.mt-link-badge {
+  position: absolute;
+  bottom: -4px;
+  left: -4px;
+  z-index: 2;
+  font-size: 8px;
+  line-height: 1;
+  padding: 1px;
+  border-radius: 50%;
+  background-color: var(--panel-bg);
+  box-shadow: 0 0 0 1px var(--panel-border);
+  opacity: 0.75;
+}
+
 .mt-tile-badge.is-delete.is-confirming {
   top: -9px;
   right: -9px;

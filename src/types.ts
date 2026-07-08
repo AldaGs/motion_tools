@@ -4,6 +4,10 @@ export type MacroType = 'menuCommand' | 'expression' | 'script' | 'sequence' | '
 
 export interface Macro {
   id: string;
+  /** Shared across linked duplicates (buttons copied into other profiles with
+   * "Link"). Edits to shared fields propagate to every macro with the same
+   * `linkId`. `undefined` = standalone / independent copy. */
+  linkId?: string;
   label: string;
   type: MacroType;
   payload: string;

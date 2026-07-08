@@ -393,6 +393,80 @@ function App() {
     toast.info(`Moved to "${targetName}".`);
   };
 
+  // Copy a macro into another profile, leaving the original in place. `linked`
+  // controls whether the copy shares a `linkId` with the source (edits to
+  // shared fields propagate) or is a fully independent standalone button.
+  // Stays on the current profile — the copy is a background action.
+  const handleCopyMacroToProfile = (macroId: string, targetProfileId: string, linked: boolean) => {
+    if (!appData) return;
+    const sourceIdx = appData.profiles.findIndex((p) => p.id === appData.activeProfileId);
+    const targetIdx = appData.profiles.findIndex((p) => p.id === targetProfileId);
+    if (sourceIdx < 0 || targetIdx < 0) { setMoveMenu(null); return; }
+    const src = appData.profiles[sourceIdx].macros.find((m) => m.id === macroId);
+    if (!src) { setMoveMenu(null); return; }
+
+    pushUndo(appData);
+    const newId = 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+    // For a linked copy, reuse the source's linkId or lazily mint one and stamp
+    // it back onto the source so the two instances form a group.
+    const linkId = linked ? (src.linkId ?? ('lk_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7))) : undefined;
+    const copy: Macro = {
+      ...src,
+      id: newId,
+      linkId,
+      tags: src.tags ? [...src.tags] : undefined,
+      hotkey: undefined, // keep hotkeys per-instance to avoid cross-profile collisions
+    };
+
+    const newProfiles = appData.profiles.map((p, idx) => {
+      if (idx === targetIdx) return { ...p, macros: [...p.macros, copy] };
+      if (idx === sourceIdx && linked && !src.linkId) {
+        // Backfill the freshly-minted linkId onto the source instance.
+        return { ...p, macros: p.macros.map((m) => (m.id === macroId ? { ...m, linkId } : m)) };
+      }
+      return p;
+    });
+
+    setAppData({ ...appData, profiles: newProfiles });
+    saveConfig({ ...appData, profiles: newProfiles });
+    setMoveMenu(null);
+    const targetName = appData.profiles[targetIdx].name;
+    toast.info(`${linked ? 'Linked' : 'Copied'} to "${targetName}".`);
+  };
+
+  // Fork a linked instance so future edits no longer propagate to/from it.
+  // If unlinking leaves a single remaining instance in the group, that lone
+  // survivor is reverted to standalone too (a group of one isn't a link).
+  const handleUnlinkMacro = (macroId: string) => {
+    if (!appData) return;
+    const profileIndex = appData.profiles.findIndex((p) => p.id === appData.activeProfileId);
+    if (profileIndex < 0) return;
+    const target = appData.profiles[profileIndex].macros.find((m) => m.id === macroId);
+    if (!target?.linkId) return;
+    const linkId = target.linkId;
+
+    pushUndo(appData);
+    // Count remaining instances (across all profiles) that stay in the group.
+    let remaining = 0;
+    for (const p of appData.profiles)
+      for (const m of p.macros)
+        if (m.linkId === linkId && m.id !== macroId) remaining++;
+
+    const newProfiles = appData.profiles.map((p) => ({
+      ...p,
+      macros: p.macros.map((m) => {
+        if (m.id === macroId) return { ...m, linkId: undefined };
+        // Collapse a lone survivor back to standalone.
+        if (remaining === 1 && m.linkId === linkId) return { ...m, linkId: undefined };
+        return m;
+      }),
+    }));
+
+    setAppData({ ...appData, profiles: newProfiles });
+    saveConfig({ ...appData, profiles: newProfiles });
+    toast.info('Unlinked — edits no longer sync.');
+  };
+
   // Close the move menu on outside-click / Escape. Uses ref+contains so it
   // doesn't rely on React's synthetic stopPropagation also stopping the
   // native event (it does today, but that's an implementation detail).
@@ -618,6 +692,19 @@ function App() {
                       is the visual identity. Label-only tiles still render text. */}
                   {!macro.icon && macro.label && <span className="mt-tile-label">{macro.label}</span>}
                   {macro.hotkey && <span className="mt-hotkey-badge">{macro.hotkey}</span>}
+                  {/* Linked-instance marker; doubles as the unlink control in edit mode. */}
+                  {macro.linkId && (
+                    isEditMode ? (
+                      <div
+                        className="mt-tile-badge is-unlink"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={(e) => { e.stopPropagation(); handleUnlinkMacro(macro.id); }}
+                        title="Unlink — stop syncing edits with copies in other profiles"
+                      >🔗</div>
+                    ) : (
+                      <span className="mt-link-badge" title="Linked — edits sync across profiles">🔗</span>
+                    )
+                  )}
                   {isEditMode && appData.profiles.length > 1 && (
                     <div
                       className="mt-tile-badge is-move"
@@ -654,7 +741,16 @@ function App() {
 
       </div>
 
-      {moveMenu && (
+      {moveMenu && (() => {
+        // Resolve the source macro's link group so we can prevent creating a
+        // second instance of the same linked button inside one profile — that
+        // includes re-linking back into the origin profile.
+        const activeProfile = appData.profiles.find((p) => p.id === appData.activeProfileId);
+        const srcMacro = activeProfile?.macros.find((m) => m.id === moveMenu.macroId);
+        const linkId = srcMacro?.linkId;
+        const hasSibling = (p: Profile) => !!linkId && p.macros.some((m) => m.linkId === linkId);
+        const targets = appData.profiles.filter((p) => p.id !== appData.activeProfileId);
+        return (
         <div
           ref={moveMenuRef}
           style={{
@@ -665,23 +761,51 @@ function App() {
           }}
         >
           <div style={{ fontSize: '10px', color: 'var(--panel-fg-muted)', padding: '4px 8px 6px', borderBottom: '1px solid var(--panel-border)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Move to profile…</div>
-          {appData.profiles
-            .filter((p) => p.id !== appData.activeProfileId)
-            .map((p) => (
+          {targets.map((p) => {
+            // A linked button can't move into a profile that already holds a
+            // sibling — that'd put two linked instances in one profile.
+            const blocked = hasSibling(p);
+            return (
               <button
                 key={p.id}
+                disabled={blocked}
                 onClick={() => handleMoveMacroToProfile(moveMenu.macroId, p.id)}
+                title={blocked ? 'Already has a linked copy of this button' : undefined}
                 style={{
-                  background: 'none', border: 'none', color: 'var(--panel-fg)',
-                  textAlign: 'left', padding: '6px 8px', fontSize: '12px', cursor: 'pointer',
+                  background: 'none', border: 'none', color: blocked ? 'var(--panel-fg-muted)' : 'var(--panel-fg)',
+                  textAlign: 'left', padding: '6px 8px', fontSize: '12px', cursor: blocked ? 'not-allowed' : 'pointer',
+                  opacity: blocked ? 0.5 : 1,
                   borderRadius: 'var(--radius-sm)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                 }}
               >
                 {p.name}
               </button>
-            ))}
+            );
+          })}
+
+          <div style={{ fontSize: '10px', color: 'var(--panel-fg-muted)', padding: '8px 8px 6px', marginTop: '2px', borderTop: '1px solid var(--panel-border)', borderBottom: '1px solid var(--panel-border)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Copy to profile…</div>
+          {targets.map((p) => {
+            const blocked = hasSibling(p); // can't link a second instance into the same profile
+            return (
+              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: '4px', padding: '2px 4px' }}>
+                <span style={{ flex: 1, fontSize: '12px', color: 'var(--panel-fg)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
+                <button
+                  disabled={blocked}
+                  onClick={() => handleCopyMacroToProfile(moveMenu.macroId, p.id, true)}
+                  title={blocked ? 'Already linked in this profile' : 'Linked — edits to this button sync across profiles'}
+                  style={{ background: 'var(--panel-bg-sunken)', border: '1px solid var(--panel-border)', color: 'var(--panel-fg)', padding: '3px 8px', fontSize: '11px', cursor: blocked ? 'not-allowed' : 'pointer', opacity: blocked ? 0.4 : 1, borderRadius: 'var(--radius-sm)' }}
+                >🔗 Link</button>
+                <button
+                  onClick={() => handleCopyMacroToProfile(moveMenu.macroId, p.id, false)}
+                  title="Independent — a standalone copy that edits separately"
+                  style={{ background: 'var(--panel-bg-sunken)', border: '1px solid var(--panel-border)', color: 'var(--panel-fg)', padding: '3px 8px', fontSize: '11px', cursor: 'pointer', borderRadius: 'var(--radius-sm)' }}
+                >Copy</button>
+              </div>
+            );
+          })}
         </div>
-      )}
+        );
+      })()}
 
       {contextMenu && (() => {
         // Route the "Open settings…" item to whichever dedicated settings

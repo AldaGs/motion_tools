@@ -226,6 +226,7 @@ const sanitizeMacro = (raw: any): any | null => {
 
   return {
     id: raw.id,
+    linkId: typeof raw.linkId === 'string' ? raw.linkId : undefined,
     label, type, payload, color,
     icon: typeof raw.icon === 'string' ? raw.icon : undefined,
     hotkey: typeof raw.hotkey === 'string' ? raw.hotkey : undefined,

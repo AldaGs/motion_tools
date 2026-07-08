@@ -142,7 +142,7 @@ export default function DialogApp() {
             ? structuredClone(data.macro)
             : JSON.parse(JSON.stringify(data.macro));
           setEditingMacroId(data.macro.id);
-          setNewMacro({ label: data.macro.label, type: data.macro.type, payload: data.macro.payload, color: data.macro.color, icon: data.macro.icon ?? '', hotkey: data.macro.hotkey ?? '', tags: data.macro.tags ?? [], menuCommandName: data.macro.menuCommandName ?? '' });
+          setNewMacro({ linkId: data.macro.linkId, label: data.macro.label, type: data.macro.type, payload: data.macro.payload, color: data.macro.color, icon: data.macro.icon ?? '', hotkey: data.macro.hotkey ?? '', tags: data.macro.tags ?? [], menuCommandName: data.macro.menuCommandName ?? '' });
         } else {
           originalMacro.current = null;
           const newId = 'm_' + Date.now();
@@ -195,8 +195,22 @@ export default function DialogApp() {
     } else {
       macros.push(macroPayload);
     }
-    const nextAppData = { ...appData, profiles: [...appData.profiles] };
-    nextAppData.profiles[profileIndex].macros = macros;
+    // Linked instances: propagate shared fields to every macro carrying the
+    // same linkId across all profiles. `id`, `linkId`, `hotkey`, and each
+    // instance's position stay per-instance.
+    const linkId = macroPayload.linkId;
+    const nextProfiles = appData.profiles.map((p, idx) => {
+      if (idx === profileIndex) return { ...p, macros };
+      if (!linkId) return p;
+      let touched = false;
+      const out = p.macros.map((m) => {
+        if (m.linkId !== linkId || m.id === macroPayload.id) return m;
+        touched = true;
+        return { ...m, label: macroPayload.label, type: macroPayload.type, payload: macroPayload.payload, color: macroPayload.color, icon: macroPayload.icon, tags: macroPayload.tags, menuCommandName: macroPayload.menuCommandName };
+      });
+      return touched ? { ...p, macros: out } : p;
+    });
+    const nextAppData = { ...appData, profiles: nextProfiles };
     setAppData(nextAppData);
     // Hot path — debounce the disk write. saveFlush runs on Apply.
     saveDebounced(nextAppData);
@@ -222,15 +236,35 @@ export default function DialogApp() {
 
     const macros = [...data.profiles[profileIndex].macros];
     const mIdx = macros.findIndex((m) => m.id === macroId);
+    const orig = originalMacro.current;
 
-    if (originalMacro.current) {
-      if (mIdx >= 0) macros[mIdx] = originalMacro.current;
+    if (orig) {
+      if (mIdx >= 0) macros[mIdx] = orig;
     } else {
       if (mIdx >= 0) macros.splice(mIdx, 1);
     }
 
-    const nextAppData = { ...data, profiles: [...data.profiles] };
-    nextAppData.profiles[profileIndex].macros = macros;
+    const nextProfiles = [...data.profiles];
+    nextProfiles[profileIndex] = { ...nextProfiles[profileIndex], macros };
+
+    // Linked edits also touched shared fields on sibling instances in other
+    // profiles. Restore those from the pre-edit snapshot (the link invariant
+    // means siblings shared the original's field values at dialog open).
+    const linkId = orig?.linkId;
+    if (linkId) {
+      for (let i = 0; i < nextProfiles.length; i++) {
+        if (i === profileIndex) continue;
+        let touched = false;
+        const restored = nextProfiles[i].macros.map((m) => {
+          if (m.linkId !== linkId || m.id === macroId) return m;
+          touched = true;
+          return { ...m, label: orig.label, type: orig.type, payload: orig.payload, color: orig.color, icon: orig.icon, tags: orig.tags, menuCommandName: orig.menuCommandName };
+        });
+        if (touched) nextProfiles[i] = { ...nextProfiles[i], macros: restored };
+      }
+    }
+
+    const nextAppData = { ...data, profiles: nextProfiles };
     saveConfig(nextAppData); // synchronous final write — beforeunload-safe
   };
 
@@ -621,6 +655,12 @@ export default function DialogApp() {
         {dialogMode === 'macro' && (
           <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
             <h4 style={{ margin: 0, fontSize: '14px', color: 'var(--panel-fg)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '8px' }}>{originalMacro.current ? 'Edit Tool' : 'Create New Tool'}</h4>
+            {newMacro.linkId && (
+              <div style={{ fontSize: '11px', color: 'var(--panel-fg-muted)', background: 'var(--panel-bg-sunken)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', padding: '6px 8px', display: 'flex', gap: '6px', alignItems: 'center' }}>
+                <span>🔗</span>
+                <span>Linked button — edits to label, icon, color, type, payload and tags sync to its copies in other profiles. Hotkey stays local.</span>
+              </div>
+            )}
             <input type="text" placeholder="Button Label" value={newMacro.label} onChange={(e) => updateMacro({ label: e.target.value })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }} />
             <select value={newMacro.type} onChange={(e) => updateMacro({ type: e.target.value as MacroType, payload: '' })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }}>
               <option value="menuCommand">Menu Command (ID)</option>
