@@ -456,38 +456,7 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
         // named ancestor group. Selecting a named group in AI and recursing to
         // its unnamed <Path> children would otherwise lose the group's name, so
         // we thread it down as a naming fallback.
-        var itemsToProcess = [];
-        var skipped = [];   // typenames/names we can't handle — reported, not dropped silently
-        function collect(item, inheritedName) {
-            if (item.typename === "PathItem" || item.typename === "TextFrame" ||
-                item.typename === "CompoundPathItem" ||
-                item.typename === "PlacedItem" || item.typename === "RasterItem") {
-                itemsToProcess.push({ item: item, inheritedName: inheritedName });
-            } else if (item.typename === "GroupItem") {
-                var gName = (item.name && item.name.length) ? item.name : inheritedName;
-                for (var j = 0; j < item.pageItems.length; j++) collect(item.pageItems[j], gName);
-            } else {
-                var label = item.typename;
-                try { if (item.name && item.name.length) label += " '" + item.name + "'"; } catch (eN) {}
-                skipped.push(label);
-            }
-        }
-        for (var s = 0; s < sel.length; s++) collect(sel[s], "");
-
-        // Pattern fills/strokes come through as a flat gray placeholder (see
-        // _mtagRgbFromAiColor); note it so the downgrade isn't silent.
-        function noteIfPattern(colObj, what) {
-            try {
-                if (colObj && colObj.typename === "PatternColor") {
-                    skipped.push(what + " uses a pattern → flat gray placeholder");
-                }
-            } catch (eP) {}
-        }
-
-        if (itemsToProcess.length === 0) {
-            return _mtagErr("No supported items in selection." +
-                (skipped.length ? " Skipped: " + skipped.join(", ") : ""));
-        }
+        var skipped = [];   // types/names we can't handle — reported, not dropped
 
         var ab = doc.artboards[doc.artboards.getActiveArtboardIndex()];
         var abRect = ab.artboardRect;
@@ -499,13 +468,42 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
             return [ (pt[0] - abLeft) * PT_TO_PX, (abTop - pt[1]) * PT_TO_PX ];
         }
 
-        var outItems = [];
+        // Extract a path/compound-path's subpaths (AE-space vertices+tangents).
+        // Used for both rendered paths and clip-mask geometry.
+        function subpathsOf(it) {
+            var subs = [];
+            var paths = it.typename === "CompoundPathItem" ? it.pathItems : [it];
+            for (var sp = 0; sp < paths.length; sp++) {
+                var pth = paths[sp];
+                var verts = [], ins = [], outs = [];
+                for (var kk = 0; kk < pth.pathPoints.length; kk++) {
+                    var pp = pth.pathPoints[kk];
+                    var a = conv(pp.anchor);
+                    var lir = conv(pp.leftDirection);
+                    var ror = conv(pp.rightDirection);
+                    verts.push(a);
+                    ins.push([lir[0] - a[0], lir[1] - a[1]]);
+                    outs.push([ror[0] - a[0], ror[1] - a[1]]);
+                }
+                subs.push({ closed: !!pth.closed, vertices: verts, inTangents: ins, outTangents: outs });
+            }
+            return subs;
+        }
 
-        for (var i = 0; i < itemsToProcess.length; i++) {
-            var entry = itemsToProcess[i];
-            var item = entry.item;
-            var inheritedName = entry.inheritedName;
+        // Pattern fills/strokes come through as a flat gray placeholder (see
+        // _mtagRgbFromAiColor); note it so the downgrade isn't silent.
+        function noteIfPattern(colObj, what) {
+            try {
+                if (colObj && colObj.typename === "PatternColor") {
+                    skipped.push(what + " uses a pattern → flat gray placeholder");
+                }
+            } catch (eP) {}
+        }
 
+        var _imgSeq = 0;
+
+        // Build one leaf node (path/text/image); returns the node or null.
+        function buildLeaf(item, inheritedName) {
             var objOpacity = (item.opacity != null ? item.opacity / 100 : 1);
             var blend = "normal";
             try { blend = _mtagBlend(item.blendingMode); } catch (eB) { blend = "normal"; }
@@ -528,16 +526,16 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                 if (!srcPath) {
                     // Embedded / missing link → extract to a temp PNG for AE.
                     try {
-                        var tmp = _mtagTempPath("mtag_img_" + i + "_" + (new Date().getTime()) + ".png");
+                        var tmp = _mtagTempPath("mtag_img_" + (_imgSeq++) + "_" + (new Date().getTime()) + ".png");
                         _mtagExportItemToPng(item, tmp);
                         srcPath = tmp;
                         linked = false;
                     } catch (eExtract) {
                         skipped.push("image '" + imgName + "' (extract failed: " + eExtract.toString() + ")");
-                        continue;
+                        return null;
                     }
                 }
-                outItems.push({
+                return {
                     kind: "image",
                     name: imgName,
                     bbox: bbox,
@@ -545,8 +543,7 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                     linked: linked,
                     opacity: objOpacity,
                     blendMode: blend
-                });
-                continue;
+                };
             }
 
             if (item.typename === "TextFrame") {
@@ -596,7 +593,7 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                 var textName = contents ? String(contents).replace(/[\r\n\t]+/g, " ").replace(/^\s+|\s+$/g, "") : "";
                 if (!textName.length) textName = (item.name && item.name.length) ? item.name : "Text";
 
-                outItems.push({
+                return {
                     kind: "text",
                     name: textName,
                     text: contents,
@@ -608,7 +605,7 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                     opacity: objOpacity,
                     blendMode: blend,
                     appearance: { fills: fills, strokes: strokes }
-                });
+                };
             } else {
                 var subpaths = [];
                 var paths = item.typename === "CompoundPathItem" ? item.pathItems : [item];
@@ -682,7 +679,7 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                 // would fill them. Plain paths stay nonzero.
                 var fillRule = (item.typename === "CompoundPathItem") ? "even-odd" : "nonzero";
 
-                outItems.push({
+                return {
                     kind: "path",
                     name: name,
                     bbox: bbox,
@@ -690,8 +687,71 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                     blendMode: blend,
                     geometry: { subpaths: subpaths, fillRule: fillRule },
                     appearance: { fills: fills, strokes: strokes }
-                });
+                };
             }
+        }
+
+        // Build a group node, preserving nesting. A clipped group's clip path is
+        // captured separately (it masks the children) and not rendered as a shape.
+        function buildGroup(group, inheritedName) {
+            var gName = (group.name && group.name.length) ? group.name : inheritedName;
+            var isClip = false;
+            try { isClip = !!group.clipped; } catch (eC) {}
+            var clip = null;
+            var children = [];
+            for (var gi = 0; gi < group.pageItems.length; gi++) {
+                var child = group.pageItems[gi];
+                var isClipMember = false;
+                try { isClipMember = isClip && child.clipping; } catch (eM) {}
+                if (isClipMember) {
+                    try {
+                        if (child.typename === "PathItem" || child.typename === "CompoundPathItem") {
+                            clip = subpathsOf(child);
+                        }
+                    } catch (eS) {}
+                    continue;
+                }
+                var node = buildItem(child, gName);
+                if (node) children.push(node);
+            }
+            if (children.length === 0) return null;
+            var gOpacity = 1;
+            try { gOpacity = (group.opacity != null ? group.opacity / 100 : 1); } catch (eO) {}
+            var gBlend = "normal";
+            try { gBlend = _mtagBlend(group.blendingMode); } catch (eBl) {}
+            return {
+                kind: "group",
+                name: (gName && gName.length) ? gName : "Group",
+                opacity: gOpacity,
+                blendMode: gBlend,
+                clip: clip,
+                children: children
+            };
+        }
+
+        // Dispatch: group → recurse; supported leaf → buildLeaf; else skip-note.
+        function buildItem(item, inheritedName) {
+            if (item.typename === "GroupItem") return buildGroup(item, inheritedName);
+            if (item.typename === "PathItem" || item.typename === "CompoundPathItem" ||
+                item.typename === "TextFrame" || item.typename === "PlacedItem" ||
+                item.typename === "RasterItem") {
+                return buildLeaf(item, inheritedName);
+            }
+            var label = item.typename;
+            try { if (item.name && item.name.length) label += " '" + item.name + "'"; } catch (eN) {}
+            skipped.push(label);
+            return null;
+        }
+
+        var outItems = [];
+        for (var s = 0; s < sel.length; s++) {
+            var topNode = buildItem(sel[s], "");
+            if (topNode) outItems.push(topNode);
+        }
+
+        if (outItems.length === 0) {
+            return _mtagErr("No supported items in selection." +
+                (skipped.length ? " Skipped: " + skipped.join(", ") : ""));
         }
 
         var artboardWidth = (abRect[2] - abRect[0]) * PT_TO_PX;
@@ -1429,10 +1489,65 @@ function _mtagSameFile(a, b) {
     try { return a.fsName === b.fsName; } catch (e) { return false; }
 }
 
+// Add a clipping path as a layer mask (works on shape/text/footage layers).
+// clipSubpaths are in absolute comp space, matching the layer's [0,0] base
+// transform, so the mask lines up with the content. Multiple subpaths → multiple
+// Add-mode masks (union). Masks must be closed.
+function _mtagAddLayerMask(layer, clipSubpaths, warnings) {
+    if (!clipSubpaths || !clipSubpaths.length) return;
+    try {
+        var parade = layer.property("ADBE Mask Parade");
+        for (var i = 0; i < clipSubpaths.length; i++) {
+            var sp = clipSubpaths[i];
+            var maskAtom = parade.addProperty("ADBE Mask Atom");
+            var shape = new Shape();
+            shape.vertices = sp.vertices;
+            shape.inTangents = sp.inTangents;
+            shape.outTangents = sp.outTangents;
+            shape.closed = true;
+            maskAtom.property("ADBE Mask Shape").setValue(shape);
+        }
+    } catch (e) {
+        if (warnings) warnings.push("clip mask not applied: " + e.toString());
+    }
+}
+
+// Flatten the payload tree (group nodes → their leaves) into a flat leaf list,
+// matching the pre-tree render behaviour. Along the way it (a) multiplies
+// ancestor group opacity into each leaf and (b) tags leaves inside a clipping
+// group with the clip geometry + a shared clip id, so clipped siblings land on
+// one masked layer. Nested vector-group hierarchy itself is intentionally
+// flattened here (AE renders identically); clipping is the behavioural part.
+function _mtagFlattenItems(nodes) {
+    var flat = [];
+    var clipSeq = { n: 0 };
+    function walk(list, clip, clipId, clipName, opMul) {
+        for (var i = 0; i < list.length; i++) {
+            var nd = list[i];
+            if (nd && nd.kind === "group") {
+                var c = clip, cid = clipId, cname = clipName;
+                if (nd.clip && nd.clip.length) {
+                    c = nd.clip; cid = "clip" + (clipSeq.n++); cname = nd.name || "Clip Group";
+                }
+                var mul = opMul * (nd.opacity != null ? nd.opacity : 1);
+                walk(nd.children || [], c, cid, cname, mul);
+            } else if (nd) {
+                if (clip) { nd.__clip = clip; nd.__clipId = clipId; nd.__clipName = clipName; }
+                if (opMul < 1) nd.opacity = (nd.opacity != null ? nd.opacity : 1) * opMul;
+                flat.push(nd);
+            }
+        }
+    }
+    walk(nodes, null, null, null, 1);
+    return flat;
+}
+
 // ---------------- After Effects import ----------------
 // Creates a shape layer in the active comp from an ArtworkPayload: one shape
 // group holding all subpaths, with fills and strokes stacked so strokes render
 // over fills. Applies object opacity + blend mode at the layer level.
+// Group nodes are flattened (see _mtagFlattenItems); clipping groups become
+// masked layers.
 function mtagSwitchAeImport(jsonString) {
     try {
         var payload = JSON.parse(jsonString);
@@ -1442,13 +1557,19 @@ function mtagSwitchAeImport(jsonString) {
         }
         var items = payload.items;
         if (!items || items.length === 0) return _mtagErr("Payload has no items.");
-        
+        // Flatten group nodes → leaves (carrying clip + group-opacity info).
+        items = _mtagFlattenItems(items);
+        if (items.length === 0) return _mtagErr("Payload has no renderable items.");
+
         var options = payload.options || { grouped: true, centerAnchor: false };
         var warnings = [];
-        
+
         app.beginUndoGroup("MTAG Switch: Import");
-        
+
         var groupedShapeLayer = null;
+        // Clipping groups: one masked shape layer per clip id, keyed here. Masks
+        // are applied after all paths are added.
+        var clipLayers = {};
         // Gradient items in grouped mode get isolated onto their own layers
         // (see _mtagItemHasGradient). Tracked here so the final alignment block
         // positions them together with the grouped layer.
@@ -1530,22 +1651,38 @@ function mtagSwitchAeImport(jsonString) {
                         textLayer.property("Transform").property("Position").setValue([oldPos[0] + ax, oldPos[1] + ay]);
                     } catch(eText) {}
                 }
-                
+
+                if (item.__clip) warnings.push("clip group: text '" + (item.name || "") + "' left unclipped (text masking not supported)");
+
             } else if (item.kind === "path") {
                 var geom = item.geometry;
                 var appr = item.appearance || { fills: [], strokes: [] };
                 var fills = appr.fills || [];
                 var strokes = appr.strokes || [];
                 
+                // Clipped items share one masked layer per clip group (a layer
+                // mask would otherwise clip unrelated grouped siblings).
+                var clipId = item.__clipId || null;
                 // Gradient items (layer-wide Ramp fallback) and blend-mode items
                 // (blend lives on the layer) can't safely share the grouped
                 // layer. Isolate them onto their own layer, which is aligned
                 // with the group at the end.
-                var isolated = options.grouped && _mtagItemNeedsOwnLayer(item);
-                var ownLayer = (!options.grouped) || isolated;
+                var isolated = !clipId && options.grouped && _mtagItemNeedsOwnLayer(item);
+                var ownLayer = !clipId && ((!options.grouped) || isolated);
 
                 var layerToUse, targetContents;
-                if (ownLayer) {
+                if (clipId) {
+                    if (!clipLayers[clipId]) {
+                        var cl = comp.layers.addShape();
+                        cl.name = item.__clipName || "Clip Group";
+                        cl.property("Transform").property("Anchor Point").setValue([0, 0]);
+                        cl.property("Transform").property("Position").setValue([0, 0]);
+                        clipLayers[clipId] = { layer: cl, clip: item.__clip };
+                        isolatedLayers.push(cl); // aligned with the group at the end
+                    }
+                    layerToUse = clipLayers[clipId].layer;
+                    targetContents = layerToUse.property("Contents");
+                } else if (ownLayer) {
                     layerToUse = comp.layers.addShape();
                     layerToUse.name = item.name || "Shape";
                     // Neutralise the default transform so path coords map 1:1 to
@@ -1692,6 +1829,7 @@ function mtagSwitchAeImport(jsonString) {
                         if (item.blendMode && item.blendMode !== "normal") {
                             try { imgLayer.blendingMode = _mtagAeBlend(item.blendMode); } catch (eBl) {}
                         }
+                        if (item.__clip) warnings.push("clip group: image '" + (item.name || "") + "' left unclipped (image masking not supported)");
                     }
                 }
             }
@@ -1718,7 +1856,15 @@ function mtagSwitchAeImport(jsonString) {
             }
         }
         
-        // Position the grouped layer AND any isolated gradient layers together
+        // Apply each clip group's mask to its layer. Layers are still at [0,0]
+        // (alignment below sets anchor==position, a visual no-op), so the mask —
+        // authored in absolute comp coords — lines up with the shape content.
+        for (var cid in clipLayers) {
+            if (!clipLayers.hasOwnProperty(cid)) continue;
+            _mtagAddLayerMask(clipLayers[cid].layer, clipLayers[cid].clip, warnings);
+        }
+
+        // Position the grouped layer AND any isolated gradient/clip layers together
         // so they overlay correctly (all share [0,0] base transform + absolute
         // path coords).
         var alignLayers = [];

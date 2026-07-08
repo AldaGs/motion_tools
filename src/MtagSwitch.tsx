@@ -37,7 +37,16 @@ interface ImportResult {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// True if any node (recursing into groups) is an image — used to decide whether
+// the send needs an AE image folder.
+function containsImage(nodes: AnyItem[]): boolean {
+  return nodes.some((n) => n.kind === 'image' || (n.kind === 'group' && containsImage(n.children)));
+}
+
 function summarizeItem(item: AnyItem): string {
+  if (item.kind === 'group') {
+    return `[Group] ${item.name} · ${item.children.length} item${item.children.length === 1 ? '' : 's'}${item.clip ? ' · clipped' : ''}`;
+  }
   if (item.kind === 'image') {
     return `[Image] ${item.name}${item.linked ? '' : ' (embedded)'}`;
   }
@@ -395,7 +404,7 @@ export default function MtagSwitch() {
       if (transport === 'bridgetalk') {
         // Images need a destination folder in the AE project — resolve it (and
         // prompt if unset) before beaming.
-        const hasImages = payload.items.some((it) => it.kind === 'image');
+        const hasImages = containsImage(payload.items);
         if (hasImages) {
           const ok = await ensureImageFolder();
           if (!ok) { setLastResult('send cancelled — no image folder chosen'); return; }

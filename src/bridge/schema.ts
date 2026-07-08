@@ -135,7 +135,19 @@ export interface ImageItem {
   blendMode: BlendMode;
 }
 
-export type AnyItem = PathItem | TextItem | ImageItem;
+// A group node preserves AI group nesting. `clip` (when present) is the
+// clipping path of a clipping group — on import it masks the group's contents.
+// children may themselves be groups (arbitrary nesting).
+export interface GroupItem {
+  kind: 'group';
+  name: string;
+  opacity: number;                              // 0..1 (object-level)
+  blendMode: BlendMode;
+  clip?: SubPath[] | null;
+  children: AnyItem[];
+}
+
+export type AnyItem = PathItem | TextItem | ImageItem | GroupItem;
 
 export interface ArtworkPayload {
   origin: {
