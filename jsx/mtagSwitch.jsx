@@ -554,21 +554,57 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                 var fills = [];
                 var strokes = [];
                 var aiAnchor = null;
-                
+
+                // Point vs area (box) vs path text — drives AE layer creation.
+                var textKind = "point";
                 try {
-                    if (item.anchor) aiAnchor = conv(item.anchor);
+                    if (item.kind === TextType.AREATEXT) textKind = "area";
+                    else if (item.kind === TextType.PATHTEXT) textKind = "path";
+                } catch (eKind) {}
+
+                // Point text uses its baseline anchor; area text is positioned by
+                // its box top-left.
+                try {
+                    if (textKind === "area") aiAnchor = [bbox.x, bbox.y];
+                    else if (item.anchor) aiAnchor = conv(item.anchor);
                 } catch (e) {}
-                
+
+                // Walk characters, grouping consecutive same-style ones (font /
+                // size / fill) into runs so multi-style text can round-trip.
+                var runs = [];
                 try {
                     var range = item.textRange;
                     if (range && range.length > 0) {
-                        var charAttrs = range.characterAttributes;
-                        if (charAttrs.textFont) font = charAttrs.textFont.name;
-                        if (charAttrs.size) fontSize = charAttrs.size * PT_TO_PX;
-                        if (charAttrs.fillColor && charAttrs.fillColor.typename !== "NoColor") {
-                            noteIfPattern(charAttrs.fillColor, "'" + (item.name || "text") + "' fill");
-                            fills.push(_mtagPaintFromAiColor(charAttrs.fillColor, 1, conv));
+                        var chars = range.characters;
+                        var cur = null;
+                        for (var ci = 0; ci < chars.length; ci++) {
+                            var ca = chars[ci].characterAttributes;
+                            var cf = "ArialMT";
+                            try { if (ca.textFont) cf = ca.textFont.name; } catch (e1) {}
+                            var cz = 12;
+                            try { if (ca.size) cz = ca.size * PT_TO_PX; } catch (e2) {}
+                            var crgba = null;
+                            try {
+                                if (ca.fillColor && ca.fillColor.typename !== "NoColor") {
+                                    if (ca.fillColor.typename === "PatternColor")
+                                        noteIfPattern(ca.fillColor, "'" + (item.name || "text") + "' fill");
+                                    var pr = _mtagPaintFromAiColor(ca.fillColor, 1, conv);
+                                    if (pr && pr.kind === "solid") crgba = pr.rgba;
+                                }
+                            } catch (e3) {}
+                            var chStr = "";
+                            try { chStr = chars[ci].contents; } catch (e4) {}
+                            var same = cur && cur.font === cf && cur.fontSize === cz &&
+                                ((cur.fillRgba == null && crgba == null) ||
+                                 (cur.fillRgba && crgba && cur.fillRgba[0] === crgba[0] &&
+                                  cur.fillRgba[1] === crgba[1] && cur.fillRgba[2] === crgba[2] &&
+                                  cur.fillRgba[3] === crgba[3]));
+                            if (same) { cur.text += chStr; }
+                            else { cur = { text: chStr, font: cf, fontSize: cz, fillRgba: crgba }; runs.push(cur); }
                         }
+
+                        // Stroke (DOM exposes one) + paragraph justification.
+                        var charAttrs = range.characterAttributes;
                         if (charAttrs.strokeColor && charAttrs.strokeColor.typename !== "NoColor") {
                             noteIfPattern(charAttrs.strokeColor, "'" + (item.name || "text") + "' stroke");
                             strokes.push({
@@ -577,7 +613,6 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                                 cap: "butt", join: "miter", miterLimit: 4
                             });
                         }
-                        
                         var pAttrs = range.paragraphAttributes;
                         if (pAttrs && pAttrs.justification) {
                             var j = String(pAttrs.justification);
@@ -586,7 +621,20 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                         }
                     }
                 } catch(e) {}
-                
+
+                // Dominant run (most characters) sets the layer-wide style so a
+                // single-style AE fallback still looks right.
+                var dom = null;
+                for (var dr = 0; dr < runs.length; dr++) {
+                    if (!dom || runs[dr].text.length > dom.text.length) dom = runs[dr];
+                }
+                if (dom) {
+                    font = dom.font;
+                    fontSize = dom.fontSize;
+                    if (dom.fillRgba) fills = [{ kind: "solid", rgba: dom.fillRgba }];
+                }
+                if (runs.length > 1) skipped.push("'" + (item.name || "text") + "' text has " + runs.length + " style runs");
+
                 // Name the AE text layer after its content (matches AI's own
                 // Layers-panel behaviour of showing the string). Collapse
                 // newlines/whitespace so the layer name stays single-line.
@@ -600,6 +648,9 @@ function mtagSwitchAiExport(grouped, centerAnchor) {
                     font: font,
                     fontSize: fontSize,
                     justification: just,
+                    textKind: textKind,
+                    boxSize: (textKind === "area") ? [bbox.w, bbox.h] : null,
+                    runs: (runs.length > 1) ? runs : null,
                     bbox: bbox,
                     aiAnchor: aiAnchor,
                     opacity: objOpacity,
@@ -1581,9 +1632,21 @@ function mtagSwitchAeImport(jsonString) {
             var item = items[idx];
             
             if (item.kind === "text") {
-                var textLayer = comp.layers.addText(item.text);
+                // Area text → a box/paragraph text layer so wrapping is kept;
+                // point/path text → a normal point-text layer.
+                var textLayer;
+                if (item.textKind === "area" && item.boxSize && comp.layers.addBoxText) {
+                    try {
+                        textLayer = comp.layers.addBoxText(item.boxSize, item.text);
+                    } catch (eBox) {
+                        textLayer = comp.layers.addText(item.text);
+                    }
+                } else {
+                    textLayer = comp.layers.addText(item.text);
+                    if (item.textKind === "path") warnings.push("text '" + (item.name || "") + "' was on a path → imported as point text");
+                }
                 textLayer.name = item.name || "Text";
-                
+
                 var textProp = textLayer.property("Source Text");
                 var textDoc = textProp.value;
                 textDoc.font = item.font;
@@ -1623,7 +1686,41 @@ function mtagSwitchAeImport(jsonString) {
                 }
                 
                 textProp.setValue(textDoc);
-                
+
+                // Multi-style text: apply each run's font/size/fill to its
+                // character range. Requires AE's per-character CharacterRange API
+                // (newer AE); otherwise the dominant style above stands.
+                if (item.runs && item.runs.length > 1) {
+                    var perRunOk = false;
+                    try {
+                        if (typeof textProp.characterRange === "function") {
+                            var total = 0;
+                            for (var rt = 0; rt < item.runs.length; rt++) total += item.runs[rt].text.length;
+                            if (total === String(item.text).length) {
+                                var off = 0;
+                                for (var rn = 0; rn < item.runs.length; rn++) {
+                                    var run = item.runs[rn];
+                                    var len = run.text.length;
+                                    if (len > 0) {
+                                        var cr = textProp.characterRange(off, off + len);
+                                        try { cr.font = run.font; } catch (eF) {}
+                                        try { cr.fontSize = run.fontSize; } catch (eZ) {}
+                                        try {
+                                            if (run.fillRgba) {
+                                                cr.applyFill = true;
+                                                cr.fillColor = [run.fillRgba[0], run.fillRgba[1], run.fillRgba[2]];
+                                            }
+                                        } catch (eCol) {}
+                                    }
+                                    off += len;
+                                }
+                                perRunOk = true;
+                            }
+                        }
+                    } catch (eRange) { perRunOk = false; }
+                    if (!perRunOk) warnings.push("multi-style text '" + (item.name || "") + "' flattened to dominant style (per-character styling unavailable)");
+                }
+
                 if (item.opacity != null && item.opacity < 1) {
                     textLayer.property("Transform").property("Opacity").setValue(item.opacity * 100);
                 }
@@ -1833,29 +1930,8 @@ function mtagSwitchAeImport(jsonString) {
                     }
                 }
             }
-
-            if (item.appearance && item.appearance.shadows && item.appearance.shadows.length > 0) {
-                var sdw = item.appearance.shadows[0];
-                // For paths, layerToUse already points at the right layer
-                // (grouped shared layer, isolated layer, or separate layer).
-                var layerForShadow = (item.kind === "text") ? textLayer : layerToUse;
-                if (layerForShadow && !layerForShadow.property("Effects").property("Drop Shadow")) {
-                    try {
-                        var dropShadow = layerForShadow.property("Effects").addProperty("Drop Shadow");
-                        dropShadow.property("Shadow Color").setValue([sdw.color[0], sdw.color[1], sdw.color[2]]);
-                        dropShadow.property("Opacity").setValue(sdw.opacity * 100);
-                        var dist = Math.sqrt(sdw.offset[0]*sdw.offset[0] + sdw.offset[1]*sdw.offset[1]);
-                        var dir = Math.atan2(sdw.offset[1], sdw.offset[0]) * 180 / Math.PI;
-                        dropShadow.property("Direction").setValue(dir);
-                        dropShadow.property("Distance").setValue(dist);
-                        dropShadow.property("Softness").setValue(sdw.blur);
-                    } catch(e) {
-                        warnings.push("failed to add drop shadow: " + e.toString());
-                    }
-                }
-            }
         }
-        
+
         // Apply each clip group's mask to its layer. Layers are still at [0,0]
         // (alignment below sets anchor==position, a visual no-op), so the mask —
         // authored in absolute comp coords — lines up with the shape content.

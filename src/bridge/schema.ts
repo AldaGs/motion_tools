@@ -41,13 +41,6 @@ export interface ArtworkStubPayload {
   itemCount: number;
 }
 
-export interface Shadow {
-  color: [number, number, number];
-  opacity: number;
-  offset: [number, number];
-  blur: number;
-}
-
 // Stage 2+3 payload: path geometry + appearance (fills, strokes, gradients,
 // opacity, blend mode).
 export interface SubPath {
@@ -104,21 +97,34 @@ export interface PathItem {
   opacity: number;                              // 0..1 (object-level)
   blendMode: BlendMode;
   geometry: { subpaths: SubPath[]; fillRule: 'nonzero' | 'even-odd' };
-  appearance: { fills: Paint[]; strokes: Stroke[]; shadows?: Shadow[] };
+  appearance: { fills: Paint[]; strokes: Stroke[] };
+}
+
+// One run of same-styled characters within a text item. `font`/`fontSize` are
+// the top-level dominant run; `runs` carries the full breakdown for multi-style
+// text (applied per-character on import when AE supports CharacterRange).
+export interface TextRun {
+  text: string;
+  font: string;
+  fontSize: number;
+  fillRgba?: [number, number, number, number] | null;
 }
 
 export interface TextItem {
   kind: 'text';
   name: string;
   text: string;
-  font: string;
-  fontSize: number;
+  font: string;                                 // dominant run
+  fontSize: number;                             // dominant run
   justification: 'left' | 'center' | 'right';
+  textKind?: 'point' | 'area' | 'path';
+  boxSize?: [number, number] | null;            // area-text box dimensions (px)
+  runs?: TextRun[] | null;                      // present only for multi-style
   bbox: { x: number; y: number; w: number; h: number };
   aiAnchor?: [number, number];
   opacity: number;                              // 0..1 (object-level)
   blendMode: BlendMode;
-  appearance: { fills: Paint[]; strokes: Stroke[]; shadows?: Shadow[] };
+  appearance: { fills: Paint[]; strokes: Stroke[] };
 }
 
 // Placed (linked) or rasterized/embedded Illustrator image. The exporter
