@@ -51,6 +51,26 @@ export default function MotionColor() {
   // time the settings menu is opened (the active project may have changed).
   useEffect(() => { if (showSettings) projectPaletteExists().then(setProjectHas); }, [showSettings]);
 
+  // On mount, light up the "linked" chain if the project already carries an
+  // embedded palette whose colors match the restored working palette — so a
+  // fresh panel open reflects the link instead of waiting for an Embed/Pull.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const embedded = await getProjectPaletteColors(true); // quiet: no toast if none
+      if (cancelled || !embedded) return;
+      const a = embedded.map((h) => norm(h).toUpperCase());
+      const b = paletteColors.map((h) => norm(h).toUpperCase());
+      if (a.length === b.length && a.every((h, i) => h === b[i])) {
+        setProjectHas(true);
+        setLinkedToProject(true);
+      }
+    })();
+    return () => { cancelled = true; };
+    // Intentionally mount-only: a one-shot check against the restored palette.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleEmbed = async () => {
     if (!paletteColors.length) { toast.info('Palette is empty — nothing to embed.'); return; }
     if (await syncPaletteToProject(paletteColors)) { setProjectHas(true); setLinkedToProject(true); }
@@ -118,8 +138,8 @@ export default function MotionColor() {
   }, [paletteColors, paletteName, settings.autoUpdateOpen]);
 
   // Auto-push edits to the embedded project palette when linked + enabled.
-  // Longer debounce than the disk write — each push rebuilds the project comp,
-  // so we wait for edits to settle. Skips first run (same reason as above).
+  // Longer debounce than the disk write — each push rewrites the project's XMP
+  // metadata, so we wait for edits to settle. Skips first run (same as above).
   const didMountSync = useRef(false);
   useEffect(() => {
     if (!didMountSync.current) { didMountSync.current = true; return; }
@@ -203,7 +223,7 @@ export default function MotionColor() {
                 <span>
                   Auto-sync project palette
                   <span style={{ display: 'block', fontSize: '10px', color: 'var(--panel-fg-dim)', marginTop: '2px' }}>
-                    When a project palette is loaded, push edits into the embedded comp automatically.
+                    When a project palette is loaded, push edits into the project metadata automatically.
                   </span>
                 </span>
               </label>
@@ -259,7 +279,7 @@ export default function MotionColor() {
         </div>
         <div style={{ display: tab === 'palette' ? 'block' : 'none' }}>
           <ColorPalette colors={paletteColors} setColors={setPaletteColors} name={paletteName} setName={setPaletteName}
-            onLinkChange={setLinkedToProject} onFromAi={handleFromAi} />
+            onLinkChange={setLinkedToProject} linked={linkedToProject} onFromAi={handleFromAi} />
         </div>
       </div>
     </div>

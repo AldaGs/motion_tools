@@ -144,3 +144,19 @@
   to   { opacity: 1; transform: none; }
 }
 .mc-fade { animation: mcFadeIn 0.18s ease both; }
+
+/* ---- Project-linked palette badge: glowing native-blue chain ---- */
+@keyframes mcLinkPulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 2px rgba(10, 132, 255, 0.7))
+            drop-shadow(0 0 5px rgba(10, 132, 255, 0.45));
+  }
+  50% {
+    filter: drop-shadow(0 0 4px rgba(10, 132, 255, 0.95))
+            drop-shadow(0 0 9px rgba(10, 132, 255, 0.7));
+  }
+}
+.mc-link-glow {
+  color: #0a84ff; /* native blue */
+  animation: mcLinkPulse 1.8s ease-in-out infinite;
+}

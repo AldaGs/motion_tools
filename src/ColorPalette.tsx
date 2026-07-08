@@ -20,11 +20,14 @@ interface Props {
   // Notifies the parent whether the working palette is the project-embedded one
   // (drives the auto-sync-to-project behavior).
   onLinkChange: (linked: boolean) => void;
+  // True when the working palette is the one embedded in the current project —
+  // surfaces the glowing chain badge in the header.
+  linked: boolean;
   // Merges colors from the AI color clip (written by MTAG Switch in Illustrator).
   onFromAi: () => void;
 }
 
-export default function ColorPalette({ colors, setColors, name, setName, onLinkChange, onFromAi }: Props) {
+export default function ColorPalette({ colors, setColors, name, setName, onLinkChange, linked, onFromAi }: Props) {
   const [saved, setSaved] = useState<string[]>(() => listPalettes());
   const [newHex, setNewHex] = useState('#3498db');
   const [menu, setMenu] = useState<{ x: number; y: number; index: number } | null>(null);
@@ -157,6 +160,12 @@ export default function ColorPalette({ colors, setColors, name, setName, onLinkC
       {/* ---- Palette management ---- */}
       <div className="mc-card" style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
         <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
+          {linked && (
+            <span className="mc-link-glow" title="This palette is embedded in the current project" aria-label="Linked to project"
+              style={{ display: 'inline-flex', flex: '0 0 auto' }}>
+              <FeatherIcon name="link" size={15} />
+            </span>
+          )}
           <select value={isKnown ? name.trim() : ''} onChange={(e) => handleLoad(e.target.value)} title={name} style={inp}>
             <option value="" style={{ backgroundColor: 'var(--panel-bg-elev)' }}>{saved.length ? 'Load palette…' : 'No saved palettes'}</option>
             {saved.map((n) => (
