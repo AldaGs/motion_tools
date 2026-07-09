@@ -43,7 +43,14 @@ audit*.html
 # CEP / AE temporary files
 .debug
 .zxp
+*.zxp
 *.jsx.bin
+
+# ZXP packaging staging dir (recreated each `npm run package`)
+.zxp-staging/
+
+# Local ZXP signing config (paths + cert password). Keep the example committed.
+zxp.local.json
 
 # Bundled GIF binaries (provided per-machine / at package time; see bin/README.md)
 bin/win/

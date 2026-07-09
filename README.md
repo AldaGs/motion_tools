@@ -4,9 +4,10 @@
 
 Motion Toolbar is a suite of panels for Adobe After Effects that speeds up the
 everyday work of motion designers — custom macro buttons, a math-accurate
-easing editor, a color-palette workbench, a one-click GIF exporter, and a
-searchable command palette. This guide is written for artists, not coders:
-you do **not** need to know anything about programming to install or use it.
+easing editor, a color-palette workbench, a one-click GIF exporter, an
+Illustrator/Photoshop → After Effects artwork bridge, and a searchable command
+palette. This guide is written for artists, not coders: you do **not** need to
+know anything about programming to install or use it.
 
 ![Motion Toolbar Preview](./public/snap.png)
 
@@ -23,9 +24,11 @@ Motion Toolbar bundles **five panels**, all reachable from
 | **MTAG Easing**  | A precision cubic-bezier easing editor with Flow-compatible libraries.     |
 | **MTAG Color**   | A color-wheel + palette workbench with project sync and export.            |
 | **MTAG GIFS**    | Export your active comp straight to an optimized GIF, no round-tripping.   |
-| **Command Palette** | Press **Ctrl/Cmd + K** to fuzzy-search every AE menu command and your macros. |
+| **MTAG Switch**  | Send vectors, text, and images from Illustrator & Photoshop into AE.       |
 
-You also get a **Secondary Toolbar** panel — a second copy of the macro
+Inside MTAG Toolbar you also get the **Command Palette** — press
+**Ctrl/Cmd + K** to fuzzy-search every AE menu command and your own macros.
+And a **Secondary Toolbar** panel gives you a second copy of the macro
 dashboard, so you can keep two profiles docked at the same time.
 
 ---
@@ -184,11 +187,42 @@ Media Encoder.
 `.zxp`, these are already included. If you installed manually and the panel
 says "binaries not found", see **Troubleshooting** below.
 
-### 5. Command Palette — Ctrl/Cmd + K
+### 5. MTAG Switch — Illustrator & Photoshop → After Effects
 
-Press **Ctrl + K** (Windows) or **Cmd + K** (macOS) inside any Motion
-Toolbar panel to open a fuzzy-searchable list of every AE menu command
-*and* every macro you've built. Type a few letters, hit Enter — done.
+Send artwork straight from **Illustrator** or **Photoshop** into After Effects —
+no copy-paste, no re-drawing, no exporting files by hand.
+
+- **Live, editable results** — vector paths come in as real AE shape layers.
+  Rectangles, ellipses, and stars stay **parametric** (editable Rect/Ellipse/
+  Polystar), not frozen bezier paths.
+- **Full appearance** — strokes (width, caps, joins, dashes), linear/radial
+  gradients, opacity, blend modes, compound paths, and clipping masks come
+  across with your art.
+- **Real text** — type layers arrive as **editable AE text** with the right
+  font, size, color, and multi-style runs preserved (point and area text).
+- **Images too** — placed/embedded artwork in Illustrator, and selected
+  Photoshop layers, import as footage and land in the right spot automatically.
+- **No second panel to babysit** — transfers ride Adobe's own app-to-app
+  bridge, so After Effects receives even if its Switch panel is closed.
+
+**How to use it**
+
+- In **Illustrator** or **Photoshop**, select the artwork you want to send.
+- Open the **MTAG Switch** panel (Window → Extensions) and click **Send**.
+- Switch to After Effects — your art is already there, on the active comp.
+- Use the toolbar toggles to choose grouped vs. separate layers, anchor
+  behavior, and whether recognised shapes come in as live shapes or raw paths.
+
+**Note:** MTAG Switch also appears in Illustrator and Photoshop under
+**Window → Extensions** (that's how it sends). It works on the same machine —
+After Effects, Illustrator, and Photoshop just need to be running.
+
+#### Bonus: the Command Palette — Ctrl/Cmd + K
+
+Built into MTAG Toolbar (not a separate panel): press **Ctrl + K** (Windows)
+or **Cmd + K** (macOS) inside any Motion Toolbar panel to open a
+fuzzy-searchable list of every AE menu command *and* every macro you've
+built. Type a few letters, hit Enter — done.
 
 ---
 

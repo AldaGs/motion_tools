@@ -1,0 +1,8 @@
+{
+  "zxpSignCmd": "C:/Users/you/Desktop/ZXPSIGN/ZXPSignCmd.exe",
+  "cert": "C:/Users/you/Desktop/ZXPSIGN/mtag_cert.p12",
+  "password": "your-cert-password",
+  "outDir": "C:/Users/you/Desktop/ZXPSIGN",
+  "name": "MotionToolbar",
+  "timestamp": "http://timestamp.digicert.com"
+}
