@@ -8,6 +8,18 @@
 // distinguish evalScript failures (which return "EvalScript error.") from
 // real host-side errors.
 
+// Load the gradient .ffx preset helper (AE 2026 gradient workaround). It lives
+// beside this file; resolve via $.fileName so it works from the shared CEP ext
+// folder. Guarded + optional: if it's missing, gradient import silently keeps
+// the older Gradient Ramp fallback.
+try {
+    if (typeof _mtagBuildGradFfxString === "undefined") {
+        var _mtagSelfFile = new File($.fileName);
+        var _mtagGradFfxFile = new File(_mtagSelfFile.parent.fsName + "/mtagGradFfx.jsx");
+        if (_mtagGradFfxFile.exists) { $.evalFile(_mtagGradFfxFile); }
+    }
+} catch (e) {}
+
 // Illustrator's ExtendScript does NOT ship a native JSON object (only After
 // Effects, InDesign, and Photoshop CS4+ do). Provide a tiny stringify/parse
 // pair guarded by a feature check so this file loads in either host. Only
@@ -897,9 +909,43 @@ function mtagSwitchAiExport(grouped, centerAnchor, parametric) {
             return null;
         }
 
+        // AI's `selection` array isn't guaranteed to be in z-order, so multiple
+        // loose (ungrouped) objects could export in the wrong stacking order and
+        // land reversed/scrambled in AE. Sort front-to-back (frontmost first) so
+        // the AE side — which stacks items[0] on top — preserves the AI design.
+        // Key: containing-layer index in doc.layers (0 = topmost layer), then
+        // zOrderPosition (higher = more front within a layer). Wrapped so any DOM
+        // quirk falls back to the raw selection order. A single object or a lone
+        // group is unaffected (length <= 1; a group's children keep pageItems
+        // order inside buildGroup).
+        var selArr = [];
+        for (var so = 0; so < sel.length; so++) selArr.push(sel[so]);
+        if (selArr.length > 1) {
+            try {
+                var _layerIndexOf = function (it) {
+                    try {
+                        var lyr = it.layer, lyrs = doc.layers;
+                        for (var li = 0; li < lyrs.length; li++) { if (lyrs[li] === lyr) return li; }
+                    } catch (e) {}
+                    return 0;
+                };
+                selArr.sort(function (a, b) {
+                    var la = _layerIndexOf(a), lb = _layerIndexOf(b);
+                    if (la !== lb) return la - lb;      // lower layer index = more front
+                    var za = 0, zb = 0;
+                    try { za = a.zOrderPosition; } catch (e1) {}
+                    try { zb = b.zOrderPosition; } catch (e2) {}
+                    return zb - za;                     // higher zOrderPosition = more front
+                });
+            } catch (eSort) {
+                selArr = [];
+                for (var sr = 0; sr < sel.length; sr++) selArr.push(sel[sr]);
+            }
+        }
+
         var outItems = [];
-        for (var s = 0; s < sel.length; s++) {
-            var topNode = buildItem(sel[s], "");
+        for (var s = 0; s < selArr.length; s++) {
+            var topNode = buildItem(selArr[s], "");
             if (topNode) outItems.push(topNode);
         }
 
@@ -1335,9 +1381,12 @@ function _mtagAeBlend(str) {
 function _mtagAeCap(str) { return str === "round" ? 2 : str === "square" ? 3 : 1; }
 function _mtagAeJoin(str) { return str === "round" ? 2 : str === "bevel" ? 3 : 1; }
 
-// True if any fill or stroke of the item is a gradient. Used to isolate such
-// items onto their own layer in grouped mode, because the Ramp-effect gradient
-// fallback is layer-wide and would tint sibling shapes on a shared layer.
+// True if any fill or stroke of the item is a gradient. Historically this forced
+// isolation onto its own layer in grouped mode, because the old Gradient Ramp
+// fallback was layer-wide and tinted siblings. Gradients now apply as real
+// per-group G-Fill/G-Stroke operators (via the .ffx preset), so they NO LONGER
+// need isolation and can share the grouped layer. Kept for reference / the rare
+// case where a gradient degrades to the layer-wide Ramp fallback.
 function _mtagItemHasGradient(item) {
     var a = item.appearance;
     if (!a) return false;
@@ -1363,11 +1412,12 @@ function _mtagItemHasBlend(item) {
     return !!(item.blendMode && item.blendMode !== "normal");
 }
 
-// An item must own its layer (even in grouped mode) if a layer-level property
-// can't be represented on a shared shape layer: gradient Ramp fallback or a
-// blend mode.
+// An item must own its layer (even in grouped mode) only if it carries a
+// layer-level property that can't live on a shared shape layer — i.e. a
+// non-normal blend mode. Gradients used to force this too, but they now apply
+// per shape group (see _mtagItemHasGradient) and share the grouped layer fine.
 function _mtagItemNeedsOwnLayer(item) {
-    return _mtagItemHasGradient(item) || _mtagItemHasBlend(item);
+    return _mtagItemHasBlend(item);
 }
 
 // Build the flat value array AE's "Gradient Colors" property expects:
@@ -1389,6 +1439,21 @@ function _mtagGradValue(stops) {
     return colorArr.concat(alphaArr);
 }
 
+// Remove an orphaned gradient operator that AE may leave in the group after
+// addProperty threw an internal verification failure. Scans from the tail (the
+// just-attempted operator is last) and removes the first match found there.
+function _mtagStripTrailingGrad(groupContents, matchName) {
+    try {
+        for (var p = groupContents.numProperties; p >= 1; p--) {
+            var pr = groupContents.property(p);
+            if (pr && pr.matchName === matchName) {
+                try { pr.remove(); } catch (e1) {}
+                return;
+            }
+        }
+    } catch (e2) {}
+}
+
 // Add a fill operator (solid or gradient) to a shape group's Contents.
 // shapeLayer is needed for the Ramp effect fallback when gradient colors
 // can't be set via setValue (AE scripting limitation).
@@ -1396,23 +1461,54 @@ function _mtagGradValue(stops) {
 function _mtagAddFill(groupContents, paint, shapeLayer) {
     var warnings = [];
     if (paint.kind === "gradient") {
-        var gf = groupContents.addProperty("ADBE Vector Graphic - G-Fill");
+        // NOTE: addProperty("ADBE Vector Graphic - G-Fill") itself can THROW an
+        // "internal verification failure" on some AE builds (seen on AE 2026/v26:
+        // matchName G-Fill mismatch with resultP expected Fill). It must stay
+        // inside the try so a throw degrades to the Ramp/solid fallback below
+        // instead of aborting the entire beam. _mtagStripTrailingGrad cleans up
+        // any orphaned operator AE may leave behind after the failed add.
+        var gf = null;
         var gradSet = false;
+        var gradViaPreset = false;
         try {
+            gf = groupContents.addProperty("ADBE Vector Graphic - G-Fill");
             gf.property("ADBE Vector Grad Type").setValue(paint.type === "radial" ? 2 : 1);
             gf.property("ADBE Vector Grad Start Pt").setValue(paint.start);
             gf.property("ADBE Vector Grad End Pt").setValue(paint.end);
-            gf.property("ADBE Vector Grad Colors").setValue(_mtagGradValue(paint.stops));
+            // PRIMARY color path: patch the stops with AE's own .ffx serialization
+            // (real N stops + midpoints), mirroring AEUX. Falls back to the
+            // reverse-engineered flat-array setValue if the preset helper is
+            // absent or the apply fails.
+            if (typeof _mtagApplyGradColorsPreset === "function" &&
+                _mtagApplyGradColorsPreset(shapeLayer, gf, paint.stops)) {
+                gradViaPreset = true;
+            } else {
+                gf.property("ADBE Vector Grad Colors").setValue(_mtagGradValue(paint.stops));
+            }
             gradSet = true;
         } catch (eg) {
             gradSet = false;
         }
         if (!gradSet) {
-            // ADBE Vector Grad Colors is not settable via script on this AE version.
-            // Fallback: remove the failed gradient fill, add a white solid so the
-            // shape is visible, then apply the ADBE Ramp effect to the layer to
-            // approximate the gradient visually.
-            try { gf.remove(); } catch(er) {}
+            // G-Fill add or Grad Colors setValue failed on this AE version
+            // (notably AE 2026/v26). Clean up any orphaned operator first.
+            try { if (gf) gf.remove(); } catch(er) {}
+            _mtagStripTrailingGrad(groupContents, "ADBE Vector Graphic - G-Fill");
+            // FIRST fallback: apply a pre-built gradient .ffx preset, which
+            // injects a valid G-Fill stream without the scripted addProperty
+            // that v26 rejects, preserving all stops + midpoints. Only fires if
+            // the helper loaded; degrades to the Ramp path below on any failure.
+            if (typeof _mtagApplyGradientFillPreset === "function" && shapeLayer) {
+                try {
+                    if (_mtagApplyGradientFillPreset(shapeLayer, groupContents, paint)) {
+                        if (paint.stops.length > 8) warnings.push("gradient had " + paint.stops.length + " stops; preset supports max 8 (extra stops dropped)");
+                        warnings.push("gradient applied via .ffx preset (native G-Fill unavailable on this AE build)");
+                        return warnings;
+                    }
+                } catch (ePreset) {}
+            }
+            // SECOND fallback: add a solid so the shape is visible, then apply
+            // the ADBE Ramp effect to approximate the gradient (2-stop).
             var sf = groupContents.addProperty("ADBE Vector Graphic - Fill");
             // Use last stop color so the shape at least shows the end color
             var sLast = paint.stops[paint.stops.length - 1] || paint.stops[0] || { rgba: [0,0,0,1] };
@@ -1437,7 +1533,9 @@ function _mtagAddFill(groupContents, paint, shapeLayer) {
             } else {
                 warnings.push("gradient fill downgraded to solid (AE scripting limitation on Grad Colors)");
             }
-        } else {
+        } else if (!gradViaPreset) {
+            // Only the reverse-engineered setValue path flattens midpoints; the
+            // .ffx preset carries them, so skip the warning when it was used.
             var anyMid = false;
             for (var m = 0; m < paint.stops.length; m++) {
                 if (paint.stops[m].midpoint != null && Math.abs(paint.stops[m].midpoint - 0.5) > 0.001) anyMid = true;
@@ -1494,19 +1592,30 @@ function _mtagAddStroke(groupContents, stroke, shapeLayer) {
     var paint = stroke.paint;
     var strokeProp;
     if (paint.kind === "gradient") {
-        strokeProp = groupContents.addProperty("ADBE Vector Graphic - G-Stroke");
+        // See _mtagAddFill: the G-Stroke add can throw an internal verification
+        // failure on some AE builds (AE 2026/v26). Keep it inside the try so it
+        // degrades to a solid stroke instead of aborting the whole beam.
+        strokeProp = null;
         var gradSet = false;
         try {
+            strokeProp = groupContents.addProperty("ADBE Vector Graphic - G-Stroke");
             strokeProp.property("ADBE Vector Grad Type").setValue(paint.type === "radial" ? 2 : 1);
             strokeProp.property("ADBE Vector Grad Start Pt").setValue(paint.start);
             strokeProp.property("ADBE Vector Grad End Pt").setValue(paint.end);
-            strokeProp.property("ADBE Vector Grad Colors").setValue(_mtagGradValue(paint.stops));
+            // Grad Colors matchName is shared with G-Fill, so the same fill .ffx
+            // preset patches the selected G-Stroke's stops (real N stops +
+            // midpoints). Falls back to the reverse-engineered setValue.
+            if (!(typeof _mtagApplyGradColorsPreset === "function" &&
+                  _mtagApplyGradColorsPreset(shapeLayer, strokeProp, paint.stops))) {
+                strokeProp.property("ADBE Vector Grad Colors").setValue(_mtagGradValue(paint.stops));
+            }
             gradSet = true;
         } catch (egs) {
             gradSet = false;
         }
         if (!gradSet) {
-            try { strokeProp.remove(); } catch(er) {}
+            try { if (strokeProp) strokeProp.remove(); } catch(er) {}
+            _mtagStripTrailingGrad(groupContents, "ADBE Vector Graphic - G-Stroke");
             strokeProp = groupContents.addProperty("ADBE Vector Graphic - Stroke");
             var s0 = paint.stops[0] || { rgba: [0, 0, 0, 1] };
             strokeProp.property("Color").setValue([s0.rgba[0], s0.rgba[1], s0.rgba[2]]);
@@ -1767,6 +1876,47 @@ function mtagSwitchAeImport(jsonString) {
         var isolatedNoted = false;
         var totalFills = 0, totalStrokes = 0;
 
+        // Comp multiplier (Overlord parity): scale incoming art so an AI artboard
+        // maps onto a differently-sized comp (e.g. hi-res boards, or a comp that
+        // isn't 1:1 with the artboard). Mirrors AEUX getCompMultiplier =
+        // comp.width / artboardWidth. Defaults to 1 when sizes match / unknown,
+        // so the common 1:1 case is byte-identical to before. Because every layer
+        // sits at anchor A / position A*M with Scale = M, each point P maps to
+        // P*M (uniform scale about the comp origin), keeping vectors, text and
+        // images consistent. Uniform width-ratio scale (AEUX does the same) —
+        // differing aspect ratios scale by width, may overflow height.
+        var compMul = 1;
+        try {
+            var _abW = payload.origin && payload.origin.artboardWidth;
+            if (_abW && _abW > 0 && comp.width > 0) compMul = comp.width / _abW;
+            if (!isFinite(compMul) || compMul <= 0) compMul = 1;
+        } catch (eMul) { compMul = 1; }
+        // Scale a point (or scalar) by the comp multiplier.
+        function _mtagM(p) {
+            if (p == null) return p;
+            if (p.length != null) return [p[0] * compMul, p[1] * compMul];
+            return p * compMul;
+        }
+
+        // Preserve AI's front-to-back z-order: AI's frontmost object (items[0],
+        // which _mtagFlattenItems emits first) must become the TOP AE layer.
+        // comp.layers.add* always inserts at the top (index 1), so adding items
+        // in order would REVERSE them (last added ends on top, hiding the rest —
+        // the reported bug). Moving each newly created layer just below the
+        // previously created one keeps items[0] on top and the rest in order.
+        // Also stamps the comp-multiplier scale on each layer (images override it
+        // with their own fit-scale * compMul).
+        var _lastImportLayer = null;
+        function _mtagOrderLayer(lyr) {
+            if (!lyr) return lyr;
+            if (_lastImportLayer) { try { lyr.moveAfter(_lastImportLayer); } catch (eMv) {} }
+            _lastImportLayer = lyr;
+            if (compMul !== 1) {
+                try { lyr.property("Transform").property("Scale").setValue([compMul * 100, compMul * 100]); } catch (eSc) {}
+            }
+            return lyr;
+        }
+
         for (var idx = 0; idx < items.length; idx++) {
             var item = items[idx];
             
@@ -1785,6 +1935,7 @@ function mtagSwitchAeImport(jsonString) {
                     if (item.textKind === "path") warnings.push("text '" + (item.name || "") + "' was on a path → imported as point text");
                 }
                 textLayer.name = item.name || "Text";
+                _mtagOrderLayer(textLayer);
 
                 var textProp = textLayer.property("Source Text");
                 var textDoc = textProp.value;
@@ -1869,22 +2020,25 @@ function mtagSwitchAeImport(jsonString) {
                 
                 var bbox = item.bbox || { x: 0, y: 0, w: 100, h: 100 };
                 if (item.aiAnchor) {
-                    textLayer.property("Transform").property("Position").setValue(item.aiAnchor);
+                    textLayer.property("Transform").property("Position").setValue(_mtagM(item.aiAnchor));
                 } else {
                     var posX = bbox.x;
                     if (item.justification === "center") posX = bbox.x + bbox.w / 2;
                     else if (item.justification === "right") posX = bbox.x + bbox.w;
-                    textLayer.property("Transform").property("Position").setValue([posX, bbox.y + bbox.h]);
+                    textLayer.property("Transform").property("Position").setValue(_mtagM([posX, bbox.y + bbox.h]));
                 }
 
                 if (options.centerAnchor) {
                     try {
+                        // sourceRectAtTime is in layer (pre-transform) space, so the
+                        // anchor is unscaled; the offset added to position must be
+                        // scaled by the comp multiplier to stay put visually.
                         var rect = textLayer.sourceRectAtTime(comp.time, false);
                         var ax = rect.left + rect.width / 2;
                         var ay = rect.top + rect.height / 2;
                         var oldPos = textLayer.property("Transform").property("Position").value;
                         textLayer.property("Transform").property("Anchor Point").setValue([ax, ay]);
-                        textLayer.property("Transform").property("Position").setValue([oldPos[0] + ax, oldPos[1] + ay]);
+                        textLayer.property("Transform").property("Position").setValue([oldPos[0] + ax * compMul, oldPos[1] + ay * compMul]);
                     } catch(eText) {}
                 }
 
@@ -1915,6 +2069,7 @@ function mtagSwitchAeImport(jsonString) {
                         cl.property("Transform").property("Position").setValue([0, 0]);
                         clipLayers[clipId] = { layer: cl, clip: item.__clip };
                         isolatedLayers.push(cl); // aligned with the group at the end
+                        _mtagOrderLayer(cl);
                     }
                     layerToUse = clipLayers[clipId].layer;
                     targetContents = layerToUse.property("Contents");
@@ -1925,6 +2080,7 @@ function mtagSwitchAeImport(jsonString) {
                     // comp space; final positioning happens below / at the end.
                     layerToUse.property("Transform").property("Anchor Point").setValue([0, 0]);
                     layerToUse.property("Transform").property("Position").setValue([0, 0]);
+                    _mtagOrderLayer(layerToUse);
                     targetContents = layerToUse.property("Contents");
                     if (isolated) {
                         isolatedLayers.push(layerToUse);
@@ -1939,6 +2095,7 @@ function mtagSwitchAeImport(jsonString) {
                         groupedShapeLayer.name = "Imported Shapes";
                         groupedShapeLayer.property("Transform").property("Anchor Point").setValue([0, 0]);
                         groupedShapeLayer.property("Transform").property("Position").setValue([0, 0]);
+                        _mtagOrderLayer(groupedShapeLayer);
                     }
                     layerToUse = groupedShapeLayer;
                     targetContents = layerToUse.property("Contents");
@@ -2001,14 +2158,17 @@ function mtagSwitchAeImport(jsonString) {
 
                     if (!options.grouped) {
                         // Separate mode: position each layer independently now.
+                        // Anchor stays in unscaled geometry space; position =
+                        // anchor * compMul so (with Scale = compMul) every vertex
+                        // P maps to P*compMul about the comp origin.
                         var bbox = item.bbox || { x: 0, y: 0, w: 100, h: 100 };
                         var anchor = [bbox.x + bbox.w / 2, bbox.y + bbox.h / 2];
                         if (options.centerAnchor) {
                             layerToUse.property("Transform").property("Anchor Point").setValue(anchor);
-                            layerToUse.property("Transform").property("Position").setValue(anchor);
+                            layerToUse.property("Transform").property("Position").setValue(_mtagM(anchor));
                         } else {
                             layerToUse.property("Transform").property("Anchor Point").setValue([comp.width / 2, comp.height / 2]);
-                            layerToUse.property("Transform").property("Position").setValue([comp.width / 2, comp.height / 2]);
+                            layerToUse.property("Transform").property("Position").setValue(_mtagM([comp.width / 2, comp.height / 2]));
                         }
                     }
                     // Isolated-in-grouped: leave transform at [0,0]; the final
@@ -2059,13 +2219,16 @@ function mtagSwitchAeImport(jsonString) {
                     if (footageItem) {
                         var imgLayer = comp.layers.add(footageItem);
                         imgLayer.name = item.name || "Image";
+                        _mtagOrderLayer(imgLayer);
                         var ibbox = item.bbox || { x: 0, y: 0, w: footageItem.width, h: footageItem.height };
                         // Footage anchor defaults to its center; scale to bbox and
                         // drop the center at the bbox center → aligns with vectors.
                         var isx = footageItem.width ? (ibbox.w / footageItem.width) * 100 : 100;
                         var isy = footageItem.height ? (ibbox.h / footageItem.height) * 100 : 100;
-                        imgLayer.property("Transform").property("Scale").setValue([isx, isy]);
-                        imgLayer.property("Transform").property("Position").setValue([ibbox.x + ibbox.w / 2, ibbox.y + ibbox.h / 2]);
+                        // Fit-scale and position both carry the comp multiplier so
+                        // images scale about the comp origin like the vectors.
+                        imgLayer.property("Transform").property("Scale").setValue([isx * compMul, isy * compMul]);
+                        imgLayer.property("Transform").property("Position").setValue(_mtagM([ibbox.x + ibbox.w / 2, ibbox.y + ibbox.h / 2]));
                         if (item.opacity != null && item.opacity < 1) {
                             imgLayer.property("Transform").property("Opacity").setValue(item.opacity * 100);
                         }
@@ -2112,9 +2275,13 @@ function mtagSwitchAeImport(jsonString) {
             } else {
                 targetAP = [comp.width / 2, comp.height / 2];
             }
+            // Anchor stays in unscaled geometry space; position = anchor *
+            // compMul so (with each layer's Scale = compMul) the grouped art
+            // scales about the comp origin, consistent with images.
+            var alignPos = _mtagM(targetAP);
             for (var al = 0; al < alignLayers.length; al++) {
                 alignLayers[al].property("Transform").property("Anchor Point").setValue(targetAP);
-                alignLayers[al].property("Transform").property("Position").setValue(targetAP);
+                alignLayers[al].property("Transform").property("Position").setValue(alignPos);
             }
         }
 
