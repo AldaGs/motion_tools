@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "package": "npm run build && node scripts/package-zxp.mjs",
+    "release": "node scripts/release.mjs",
     "lint": "eslint .",
     "preview": "vite preview"
   },
