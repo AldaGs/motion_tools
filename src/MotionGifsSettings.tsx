@@ -90,6 +90,13 @@ export default function MotionGifsSettings() {
       <Check checked={s.loopForever} onChange={(v) => set('loopForever', v)} label="Loop forever" />
       <Check checked={s.keepFrames} onChange={(v) => set('keepFrames', v)} label="Keep intermediate frames" />
 
+      <Check checked={s.overwrite} onChange={(v) => set('overwrite', v)} label="Overwrite existing file" />
+      <div style={{ fontSize: 10, color: 'var(--panel-fg-muted)', marginTop: -8, lineHeight: 1.4 }}>
+        {s.overwrite
+          ? 'Exports reuse the plain comp name and replace any existing file.'
+          : 'Each export is saved as a new version — a "-NN" suffix is added (Comp01 → Comp01-01), never overwriting.'}
+      </div>
+
       <Check checked={s.renderInBackground} onChange={(v) => set('renderInBackground', v)}
         label="Render in background (keep editing)" />
       {s.renderInBackground && (

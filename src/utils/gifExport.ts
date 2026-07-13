@@ -43,6 +43,54 @@ export type OutputFormat = 'gif' | 'webm' | 'apng';
 export const outputExtForFormat = (fmt: OutputFormat): string =>
   fmt === 'webm' ? 'webm' : fmt === 'apng' ? 'apng' : 'gif';
 
+// Trailing "-NN" version suffix we append to exported files (e.g. "-01").
+const VERSION_SUFFIX_RE = /-(\d+)$/;
+
+/**
+ * Build a non-clobbering output path so successive exports become versions
+ * instead of overwriting each other. GIPHER always wrote `<comp>.gif`; this is
+ * the "improved technique".
+ *
+ * When `overwrite` is true this preserves the classic behavior: `dir/base.ext`.
+ *
+ * Otherwise every export gets a `-NN` version suffix. Any version suffix
+ * already on the name is discarded first so we don't stack them, then the
+ * lowest free two-digit number is chosen:
+ *   Comp01                → Comp01-01.gif   (then -02, -03, … as they fill up)
+ *   Comp01-01 (existing)  → Comp01-02.gif
+ * The comp's own trailing digits ("01" in "Comp01") are kept — only a prior
+ * "-NN" version marker is stripped.
+ */
+export const versionedOutputPath = (
+  dir: string,
+  base: string,
+  ext: string,
+  overwrite = false,
+): string => {
+  const path = window.require('path');
+  const fs = window.require('fs');
+
+  if (overwrite) return path.join(dir, `${base}.${ext}`);
+
+  // Drop an existing "-NN" so re-exporting a versioned name doesn't stack them.
+  const stem = base.replace(VERSION_SUFFIX_RE, '');
+
+  const exists = (p: string): boolean => {
+    try { return fs.existsSync(p); } catch { return false; }
+  };
+
+  let n = 1;
+  // Guard against an unbounded loop if the folder somehow can't be read.
+  while (n < 100000) {
+    const pad = n < 100 ? String(n).padStart(2, '0') : String(n);
+    const candidate = path.join(dir, `${stem}-${pad}.${ext}`);
+    if (!exists(candidate)) return candidate;
+    n++;
+  }
+  // Fallback: timestamp so we still never overwrite.
+  return path.join(dir, `${stem}-${Date.now()}.${ext}`);
+};
+
 export interface EncodeOptions {
   /** Destination path (extension should match `format`). */
   output: string;
@@ -160,6 +208,18 @@ export const revealFile = (file: string): void => {
       cp.spawn('explorer.exe', ['/select,', file.replace(/\//g, '\\')], { detached: true }).unref?.();
     } else {
       cp.spawn('open', ['-R', file], { detached: true }).unref?.();
+    }
+  } catch { /* ignore */ }
+};
+
+/** Open a folder in Explorer/Finder. Best-effort, fire-and-forget. */
+export const openFolder = (folder: string): void => {
+  const cp = window.require('child_process');
+  try {
+    if (platformDir() === 'win') {
+      cp.spawn('explorer.exe', [folder.replace(/\//g, '\\')], { detached: true }).unref?.();
+    } else {
+      cp.spawn('open', [folder], { detached: true }).unref?.();
     }
   } catch { /* ignore */ }
 };

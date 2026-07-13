@@ -601,6 +601,7 @@ export interface GifSettings {
   quality: number;               // gifski 1–100
   loopForever: boolean;
   keepFrames: boolean;
+  overwrite: boolean;            // reuse the plain <comp>.ext name; false = append a -NN version suffix
   openFolder: boolean;           // reveal the GIF in Explorer/Finder after export
   playAfter: boolean;            // open the GIF in the default player after export
   renderInBackground: boolean;   // render via aerender so AE stays editable
@@ -617,6 +618,7 @@ const GIF_SETTINGS_DEFAULTS: GifSettings = {
   quality: 70,
   loopForever: true,
   keepFrames: false,
+  overwrite: false,
   openFolder: false,
   playAfter: true,
   renderInBackground: false,

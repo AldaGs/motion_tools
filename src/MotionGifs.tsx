@@ -11,7 +11,8 @@ import { evalScript, isCEPEnvironment } from './utils/adobe';
 import { loadGifSettings, type GifSettings } from './utils/storage';
 import {
   resolveBinaries, encodeRenderToGif, convertVideoToGif, probeVideo,
-  renderInBackground, revealFile, playFile, templateFilePath, outputExtForFormat,
+  renderInBackground, revealFile, playFile, openFolder, templateFilePath, outputExtForFormat,
+  versionedOutputPath,
   type GifBinaries, type RenderResult, type BackgroundRenderPrep,
 } from './utils/gifExport';
 import { toast } from './utils/toast';
@@ -55,7 +56,15 @@ export default function MotionGifs() {
   const afterExport = (s: GifSettings, output: string) => {
     if (s.openFolder) revealFile(output);
     if (s.playAfter) playFile(output);
-    toast.info(`GIF saved: ${output}`);
+    const name = window.require('path').basename(output);
+    toast.info(`Saved ${name}`);
+  };
+
+  // Manually reveal the configured output folder in Explorer/Finder.
+  const openOutputFolder = () => {
+    const dir = settings?.outputDir;
+    if (dir) openFolder(dir);
+    else toast.error('Set an output folder in Settings first.');
   };
 
   const begin = (msg: string) => {
@@ -119,7 +128,7 @@ export default function MotionGifs() {
 
       const width = s.sizeMode === 'comp' ? render.width : s.width;
       const fps = s.fpsMode === 'comp' ? Math.round(render.frameRate) : s.fps;
-      const output = path.join(s.outputDir, `${render.name}.${outputExtForFormat(s.outputFormat)}`);
+      const output = versionedOutputPath(s.outputDir, render.name, outputExtForFormat(s.outputFormat), s.overwrite);
 
       // When aerender took the first half, remap encode progress into 50–100%.
       const encodeProgress = encodeBase
@@ -187,7 +196,7 @@ export default function MotionGifs() {
 
         const width = s.sizeMode === 'comp' ? render.width : s.width;
         const fps = s.fpsMode === 'comp' ? Math.round(render.frameRate) : s.fps;
-        lastOutput = path.join(s.outputDir, `${render.name}.${ext}`);
+        lastOutput = versionedOutputPath(s.outputDir, render.name, ext, s.overwrite);
 
         // Map this comp's 0–100 encode into its slice of the overall bar.
         const sliceBase = (i / total) * 100;
@@ -199,7 +208,7 @@ export default function MotionGifs() {
       }
       setPercent(100);
       if (s.openFolder && lastOutput) revealFile(lastOutput);
-      toast.info(`Batch export complete — ${total} file(s) in ${s.outputDir}`);
+      toast.info(`Batch export complete — ${total} file(s) saved`);
     } catch (e: any) {
       console.error(e);
       toast.error(e?.message ? `Batch failed — ${e.message.split('\n')[0]}` : 'Batch failed.');
@@ -228,7 +237,7 @@ export default function MotionGifs() {
       }
 
       const base = path.basename(res).replace(/\.[^.]+$/, '') || 'output';
-      const output = path.join(s.outputDir, `${base}.${outputExtForFormat(s.outputFormat)}`);
+      const output = versionedOutputPath(s.outputDir, base, outputExtForFormat(s.outputFormat), s.overwrite);
 
       setStatus('Starting…');
       await convertVideoToGif(
@@ -270,6 +279,11 @@ export default function MotionGifs() {
               cursor: ready ? 'pointer' : 'not-allowed',
             }}>
             {running ? 'Working…' : 'Export Active Comp'}
+          </button>
+          <button onClick={openOutputFolder} title="Open output folder"
+            disabled={!settings?.outputDir}
+            style={{ padding: '0 8px', fontSize: 12, borderRadius: 4, border: '1px solid var(--panel-border)', background: 'var(--panel-bg-elev)', color: 'var(--panel-fg)', cursor: settings?.outputDir ? 'pointer' : 'not-allowed', opacity: settings?.outputDir ? 1 : 0.5 }}>
+            📂
           </button>
           <button onClick={openSettings} title="Settings"
             style={{ padding: '0 8px', fontSize: 12, borderRadius: 4, border: '1px solid var(--panel-border)', background: 'var(--panel-bg-elev)', color: 'var(--panel-fg)', cursor: 'pointer' }}>
