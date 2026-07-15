@@ -1,9 +1,10 @@
 // src/App.tsx
 import React, { useState, useEffect, useRef } from 'react';
 import { evalScript } from './utils/adobe';
-import { loadConfig, saveConfig, setDialogPayload, resolvePath, getLastLoadDiagnostics } from './utils/storage';
+import { loadConfig, saveConfig, setDialogPayload, resolvePath, getLastLoadDiagnostics, HELPERS_PROFILE_ID } from './utils/storage';
+import MotionStagger from './MotionStagger';
 import { subscribeConfigChanges } from './utils/configWatcher';
-import type { AppData, Macro, Profile } from './types';
+import type { AppData, Macro, Profile, StaggerSettings } from './types';
 import EasingEditor from './EasingEditor';
 import DialogApp from './DialogApp';
 import MotionColor from './MotionColor';
@@ -92,6 +93,13 @@ function App() {
     return 'macros';
   })();
 
+  // Identity of THIS panel instance (main vs secondary vs …). Per-panel view
+  // state (chosen profile, override, pin) is keyed by it so the two macro
+  // panels don't mirror each other. 'dev' outside CEP.
+  const panelKey: string = (typeof window.__adobe_cep__ !== 'undefined'
+    ? window.__adobe_cep__.getExtensionId()
+    : 'dev') || 'dev';
+
   const [activeContext, setActiveContext] = useState<string>("none");
   const activeContextRef = useRef<string>("none");
 
@@ -131,8 +139,11 @@ function App() {
     // Initial load
     const data = loadConfig();
     setAppData(data);
-    if (data.settings.lastOverrideProfileId) {
-      setOverrideProfileId(data.settings.lastOverrideProfileId);
+    // Restore THIS panel's own override (legacy global field as a fallback for
+    // configs written before per-panel state existed).
+    const restored = data.settings.panels?.[panelKey]?.overrideProfileId ?? data.settings.lastOverrideProfileId;
+    if (restored) {
+      setOverrideProfileId(restored);
     }
 
     // Surface load problems once on startup so a corrupt config doesn't
@@ -163,8 +174,12 @@ function App() {
     const clearOverride = () => {
       setOverrideProfileId(null);
       setAppData((cur) => {
-        if (!cur || cur.settings.lastOverrideProfileId == null) return cur;
-        const next = { ...cur, settings: { ...cur.settings, lastOverrideProfileId: null } };
+        if (!cur || cur.settings.panels?.[panelKey]?.overrideProfileId == null) return cur;
+        const prev = cur.settings.panels?.[panelKey] ?? {};
+        const next: AppData = {
+          ...cur,
+          settings: { ...cur.settings, panels: { ...cur.settings.panels, [panelKey]: { ...prev, overrideProfileId: null } } },
+        };
         saveConfig(next);
         return next;
       });
@@ -494,11 +509,21 @@ function App() {
   // shouldn't jump the user to a different profile than they were just
   // looking at. The auto-context heartbeat is paused while editing, so the
   // resolution stays stable through the edit session.
+  const panelState = appData.settings.panels?.[panelKey] ?? {};
+  const panelPinned = panelState.pinHelpers ?? appData.settings.pinHelpers ?? false;
   let profileToShow: Profile | undefined;
-  if (overrideProfileId) {
+  const pinnedHelpers = !isEditMode && panelPinned
+    ? appData.profiles.find((p) => p.id === HELPERS_PROFILE_ID)
+    : undefined;
+  if (pinnedHelpers) {
+    // Highest precedence: a pinned Helpers view ignores auto-context and any
+    // manual override so a layer selection can't switch it away.
+    profileToShow = pinnedHelpers;
+  } else if (overrideProfileId) {
     profileToShow = appData.profiles.find((p) => p.id === overrideProfileId);
   } else if (!appData.settings.enableContext) {
-    profileToShow = appData.profiles.find((p) => p.id === appData.activeProfileId);
+    // This panel's own chosen profile (falls back to the global default).
+    profileToShow = appData.profiles.find((p) => p.id === (panelState.activeProfileId ?? appData.activeProfileId));
   } else {
     profileToShow = appData.profiles.find((p) => p.autoTriggerContext === activeContext);
     if (!profileToShow) profileToShow = appData.profiles.find((p) => p.autoTriggerContext === "none") || appData.profiles[0];
@@ -526,17 +551,12 @@ function App() {
   const handleProfileSelect = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const selectedId = e.target.value;
 
-    // Update the base active profile (for edit mode and non-context scenarios)
-    const newAppData: AppData = { ...appData, activeProfileId: selectedId };
-    setAppData(newAppData);
-    saveConfig(newAppData);
-
-    // Set the temporary override and persist it
+    // Set the manual override for THIS panel and persist it per-panel. Also
+    // releases the Helpers pin (otherwise the pick would snap back) and records
+    // the chosen profile as this panel's non-context / edit target. Does NOT
+    // touch the global activeProfileId, so the other panel is unaffected.
     setOverrideProfileId(selectedId);
-    if (appData) {
-      const next: AppData = { ...appData, settings: { ...appData.settings, lastOverrideProfileId: selectedId } };
-      saveConfig(next);
-    }
+    writePanel({ activeProfileId: selectedId, overrideProfileId: selectedId, pinHelpers: false });
   };
 
   if (view === 'dialog') {
@@ -588,6 +608,113 @@ function App() {
     );
   }
 
+  // Merge a patch into THIS panel's per-panel state and persist.
+  const writePanel = (patch: Partial<import('./types').PanelState>, base?: AppData) => {
+    const src = base ?? appData;
+    if (!src) return;
+    const prev = src.settings.panels?.[panelKey] ?? {};
+    const nd: AppData = {
+      ...src,
+      settings: {
+        ...src.settings,
+        panels: { ...src.settings.panels, [panelKey]: { ...prev, ...patch } },
+      },
+    };
+    setAppData(nd);
+    saveConfig(nd);
+  };
+
+  // Pin / unpin the Helpers profile as the active view (per panel).
+  const togglePinHelpers = () => {
+    if (!appData) return;
+    const pin = !(appData.settings.panels?.[panelKey]?.pinHelpers ?? false);
+    // Dropping a manual override on pin avoids a stale [Manual] badge fighting
+    // the pin once it's turned back off.
+    if (pin) setOverrideProfileId(null);
+    writePanel({ pinHelpers: pin, ...(pin ? { overrideProfileId: null } : {}) });
+    toast.info(pin ? 'Helpers pinned.' : 'Helpers unpinned.');
+  };
+
+  // Persist the Helpers "Stagger" tool state.
+  const updateStagger = (next: StaggerSettings) => {
+    if (!appData) return;
+    const nd: AppData = { ...appData, settings: { ...appData.settings, stagger: next } };
+    setAppData(nd);
+    saveConfig(nd);
+  };
+
+  // A single macro tile. Shared by the normal auto-fill grid and the fixed
+  // 3×3 anchor square so both stay visually identical.
+  const renderTile = (macro: Macro) => {
+    const isDropTarget = isEditMode && dragOverMacroId === macro.id && draggedMacroId !== macro.id;
+    const pendingDelete = pendingDeleteMacroId === macro.id;
+    const isGhost = !!(macro.icon && macro.color);
+    const isDragging = draggedMacroId === macro.id;
+
+    const tileClass = [
+      isEditMode ? 'mt-wiggle' : 'mt-press',
+      'mt-tile',
+      isEditMode && 'is-edit',
+      isGhost && 'is-ghost',
+      isDragging && 'is-dragging',
+    ].filter(Boolean).join(' ');
+
+    return (
+      <div
+        key={macro.id}
+        className={tileClass}
+        draggable={isEditMode}
+        onDragStart={() => handleDragStart(macro.id)}
+        onDragOver={(e) => handleDragOver(e, macro.id)}
+        onDragLeave={() => handleDragLeave(macro.id)}
+        onDragEnd={handleDragEnd}
+        onDrop={() => handleDrop(macro.id)}
+        onClick={() => (isEditMode ? openEditMacro(macro) : handleMacroClick(macro))}
+        data-drop-side={isDropTarget ? dragSide ?? undefined : undefined}
+        style={{
+          ['--mt-color' as any]: macro.color,
+          backgroundColor: isGhost ? 'transparent' : (macro.color + '40'),
+        }}
+        title={isEditMode ? `Edit: ${macro.label}` : macro.label}
+      >
+        {renderIcon(macro.icon, isGhost ? macro.color : undefined)}
+        {!macro.icon && macro.label && <span className="mt-tile-label">{macro.label}</span>}
+        {macro.hotkey && <span className="mt-hotkey-badge">{macro.hotkey}</span>}
+        {macro.linkId && (
+          isEditMode ? (
+            <div
+              className="mt-tile-badge is-unlink"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); handleUnlinkMacro(macro.id); }}
+              title="Unlink — stop syncing edits with copies in other profiles"
+            >🔗</div>
+          ) : (
+            <span className="mt-link-badge" title="Linked — edits sync across profiles">🔗</span>
+          )
+        )}
+        {isEditMode && appData.profiles.length > 1 && (
+          <div
+            className="mt-tile-badge is-move"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); openMoveMenu(macro.id, e.currentTarget); }}
+            title="Move to profile…"
+          >⇆</div>
+        )}
+        {isEditMode && (
+          <div
+            className={`mt-tile-badge is-delete${pendingDelete ? ' is-confirming' : ''}`}
+            onClick={(e) => { e.stopPropagation(); requestDeleteMacro(macro.id); }}
+            title={pendingDelete ? 'Click again to confirm' : 'Delete'}
+          >{pendingDelete ? '✓' : '×'}</div>
+        )}
+      </div>
+    );
+  };
+
+  // Consecutive builtin "anchor:*" macros render as one fixed 3×3 square so the
+  // grid never gets stretched into a single wide row by narrow/short layouts.
+  const isAnchorMacro = (m: Macro) => m.type === 'builtin' && m.payload.indexOf('anchor:') === 0;
+
   return (
     <div
       style={{ display: 'flex', flexDirection: 'column', height: '100vh', position: 'relative', overflow: 'hidden' }}
@@ -621,14 +748,21 @@ function App() {
                   ))}
                 </select>
 
-                {!isEditMode && appData.settings.enableContext && (
+                {!isEditMode && panelPinned ? (
+                  <span style={{ fontSize: '10px', color: 'var(--accent)', flexShrink: 0 }} title="Helpers pinned — auto/manual switching is paused">
+                    [Pinned]
+                  </span>
+                ) : (!isEditMode && appData.settings.enableContext && (
                   <span style={{ fontSize: '10px', color: overrideProfileId ? 'var(--warning)' : 'var(--panel-fg-muted)', flexShrink: 0 }} title={overrideProfileId ? 'Manual Override Active' : 'Auto-Context Active'}>
                     [{overrideProfileId ? 'Manual' : activeContext}]
                   </span>
-                )}
+                ))}
               </div>
-              
+
               <div style={{ display: 'flex', gap: '5px', flexShrink: 0 }}>
+                <button onClick={togglePinHelpers} title={panelPinned ? 'Unpin Helpers (resume auto/manual)' : 'Pin Helpers as the active profile'} style={{ padding: '4px 8px', fontSize: '11px', cursor: 'pointer', backgroundColor: panelPinned ? 'var(--accent)' : 'var(--panel-bg-elev)', color: panelPinned ? '#fff' : 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)' }}>
+                  📌
+                </button>
                 <button onClick={handleToggleEdit} title={appData.settings.lockMacros ? 'Locked — toggle in Settings' : (isEditMode ? 'Exit edit mode' : 'Edit')} style={{ padding: '4px 8px', fontSize: '11px', cursor: appData.settings.lockMacros ? 'not-allowed' : 'pointer', backgroundColor: isEditMode ? 'var(--danger)' : 'var(--panel-bg-elev)', color: appData.settings.lockMacros ? 'var(--panel-fg-dim)' : 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', opacity: appData.settings.lockMacros ? 0.6 : 1 }}>
                   {appData.settings.lockMacros ? '🔒' : (isEditMode ? 'Done' : 'Edit')}
                 </button>
@@ -662,78 +796,43 @@ function App() {
             // which collided with the wiggle animation and looked janky.
             // Snapping is fine; the wiggle itself sells the mode change.
           }}>
-            {profileToShow.macros.map((macro) => {
-              const isDropTarget = isEditMode && dragOverMacroId === macro.id && draggedMacroId !== macro.id;
-              const pendingDelete = pendingDeleteMacroId === macro.id;
-              const isGhost = !!(macro.icon && macro.color);
-              const isDragging = draggedMacroId === macro.id;
-
-              // Static layout lives in .mt-tile; per-tile dynamics travel via
-              // class modifiers + a `--mt-color` custom property + the
-              // hex+alpha bg (kept inline so we don't rely on color-mix being
-              // available in older CEF builds).
-              const tileClass = [
-                isEditMode ? 'mt-wiggle' : 'mt-press',
-                'mt-tile',
-                isEditMode && 'is-edit',
-                isGhost && 'is-ghost',
-                isDragging && 'is-dragging',
-              ].filter(Boolean).join(' ');
-
-              return (
-                <div
-                  key={macro.id}
-                  className={tileClass}
-                  draggable={isEditMode}
-                  onDragStart={() => handleDragStart(macro.id)}
-                  onDragOver={(e) => handleDragOver(e, macro.id)}
-                  onDragLeave={() => handleDragLeave(macro.id)}
-                  onDragEnd={handleDragEnd}
-                  onDrop={() => handleDrop(macro.id)}
-                  onClick={() => (isEditMode ? openEditMacro(macro) : handleMacroClick(macro))}
-                  data-drop-side={isDropTarget ? dragSide ?? undefined : undefined}
-                  style={{
-                    ['--mt-color' as any]: macro.color,
-                    backgroundColor: isGhost ? 'transparent' : (macro.color + '40'),
-                  }}
-                  title={isEditMode ? `Edit: ${macro.label}` : macro.label}
-                >
-                  {renderIcon(macro.icon, isGhost ? macro.color : undefined)}
-                  {/* Hide the text label when an icon is assigned — the icon
-                      is the visual identity. Label-only tiles still render text. */}
-                  {!macro.icon && macro.label && <span className="mt-tile-label">{macro.label}</span>}
-                  {macro.hotkey && <span className="mt-hotkey-badge">{macro.hotkey}</span>}
-                  {/* Linked-instance marker; doubles as the unlink control in edit mode. */}
-                  {macro.linkId && (
-                    isEditMode ? (
-                      <div
-                        className="mt-tile-badge is-unlink"
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onClick={(e) => { e.stopPropagation(); handleUnlinkMacro(macro.id); }}
-                        title="Unlink — stop syncing edits with copies in other profiles"
-                      >🔗</div>
-                    ) : (
-                      <span className="mt-link-badge" title="Linked — edits sync across profiles">🔗</span>
-                    )
-                  )}
-                  {isEditMode && appData.profiles.length > 1 && (
+            {(() => {
+              // Walk the macros, collapsing each run of anchor:* builtins into
+              // one fixed 3×3 square block; everything else renders inline.
+              const out: React.ReactNode[] = [];
+              const macros = profileToShow.macros;
+              const gap = isEditMode ? 15 : appData.settings.spacing;
+              for (let i = 0; i < macros.length; i++) {
+                if (isAnchorMacro(macros[i])) {
+                  const run: Macro[] = [];
+                  while (i < macros.length && isAnchorMacro(macros[i])) run.push(macros[i++]);
+                  i--; // for-loop will re-increment
+                  out.push(
                     <div
-                      className="mt-tile-badge is-move"
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onClick={(e) => { e.stopPropagation(); openMoveMenu(macro.id, e.currentTarget); }}
-                      title="Move to profile…"
-                    >⇆</div>
-                  )}
-                  {isEditMode && (
-                    <div
-                      className={`mt-tile-badge is-delete${pendingDelete ? ' is-confirming' : ''}`}
-                      onClick={(e) => { e.stopPropagation(); requestDeleteMacro(macro.id); }}
-                      title={pendingDelete ? 'Click again to confirm' : 'Delete'}
-                    >{pendingDelete ? '✓' : '×'}</div>
-                  )}
-                </div>
-              );
-            })}
+                      key={`anchor-grid-${run[0].id}`}
+                      style={{
+                        gridColumn: '1 / -1',
+                        justifySelf: 'start',
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(3, 1fr)',
+                        gridTemplateRows: 'repeat(3, 1fr)',
+                        gap: `${gap}px`,
+                        // Cap so 3 columns stay square even in wide panels; keep
+                        // it shrinkable so narrow panels don't overflow.
+                        width: `min(100%, ${appData.settings.buttonSize * 3 + gap * 2}px)`,
+                        aspectRatio: '1 / 1',
+                        padding: isEditMode ? '10px' : '0',
+                      }}
+                    >
+                      {run.map(renderTile)}
+                    </div>
+                  );
+                } else {
+                  out.push(renderTile(macros[i]));
+                }
+              }
+              return out;
+            })()}
 
             {isEditMode && (
               <div onClick={openCreateMacro} className="mt-add-tile">
@@ -741,6 +840,14 @@ function App() {
               </div>
             )}
           </div>
+        )}
+
+        {/* Helpers-only interactive tools (rendered below the button grid). */}
+        {view === 'macros' && profileToShow.id === HELPERS_PROFILE_ID && (
+          <MotionStagger
+            value={appData.settings.stagger ?? { type: 'tb', offset: 10, step: 2 }}
+            onChange={updateStagger}
+          />
         )}
 
         {/* VIEW 2: EASING EDITOR */}

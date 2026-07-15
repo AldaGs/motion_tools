@@ -13,6 +13,9 @@ var _insideUndo = false;
 function executeAction(actionString, _skipUndo) {
     var openedHere = 0;
     try {
+        // Result override for branches that produce their own status string
+        // (e.g. built-ins). null = fall through to the default "Success".
+        var branchResult = null;
         // ExtendScript requires a little help with JSON sometimes
         var action;
         try {
@@ -99,6 +102,12 @@ function executeAction(actionString, _skipUndo) {
                 selLayers[i].applyPreset(presetFile);
             }
 
+        } else if (action.type === 'builtin') {
+            // Panel-shipped helper actions (e.g. the locked "Helpers" profile).
+            // Runs inside the undo group opened above (needsUndo is true for
+            // this type). Payload is an id like "anchor:mc".
+            branchResult = _mtagRunBuiltin(action.payload);
+
         } else if (action.type === 'sequence') {
             // Execute a sequence of sub-actions inside ONE undo group.
             var seq;
@@ -159,7 +168,7 @@ function executeAction(actionString, _skipUndo) {
             openedHere--;
             _insideUndo = false;
         }
-        return "Success";
+        return branchResult != null ? branchResult : "Success";
 
     } catch (err) {
         // Close exactly the groups this invocation opened — not more, not less.
@@ -171,6 +180,287 @@ function executeAction(actionString, _skipUndo) {
         return "Error: " + err.toString();
     }
 
+}
+
+// --- BUILT-IN HELPERS ------------------------------------------------------
+// Dispatched from executeAction for macros of type 'builtin'. The payload is a
+// namespaced id, "<group>:<arg>", so a single macro type can back several
+// panel-shipped tools (e.g. the locked "Helpers" profile).
+function _mtagRunBuiltin(payload) {
+    var raw = (payload == null) ? "" : String(payload);
+    var sep = raw.indexOf(":");
+    var group = sep >= 0 ? raw.substring(0, sep) : raw;
+    var arg = sep >= 0 ? raw.substring(sep + 1) : "";
+    if (group === "anchor") return mtagSetAnchor(arg);
+    return "Error: Unknown helper \"" + raw + "\".";
+}
+
+// Map a 9-point position id to bounding-box fractions.
+//   tl tc tr        (0,0) (.5,0) (1,0)
+//   ml mc mr   ==>  (0,.5)(.5,.5)(1,.5)
+//   bl bc br        (0,1) (.5,1) (1,1)
+function _mtagAnchorFractions(pos) {
+    var fx = 0.5, fy = 0.5;
+    var p = String(pos || "mc");
+    if (p.indexOf("l") !== -1) fx = 0.0;
+    else if (p.indexOf("r") !== -1) fx = 1.0;
+    if (p.charAt(0) === "t") fy = 0.0;
+    else if (p.charAt(0) === "b") fy = 1.0;
+    return { fx: fx, fy: fy };
+}
+
+// Offset a scalar (separated-dimension) property by `delta` across all keys,
+// or its static value when it has none.
+function _mtagOffsetScalar(prop, delta) {
+    if (!prop) return;
+    if (prop.numKeys > 0) {
+        for (var k = 1; k <= prop.numKeys; k++) {
+            prop.setValueAtKey(k, prop.keyValue(k) + delta);
+        }
+    } else {
+        prop.setValue(prop.value + delta);
+    }
+}
+
+// Move the anchor point of every selected layer to the requested position on
+// its content's bounding box, compensating Position so the layer doesn't jump.
+// Keyframes on Anchor Point and Position are shifted by the same delta so the
+// whole animation re-bases instead of only the current-time value.
+function mtagSetAnchor(pos) {
+    var comp = app.project.activeItem;
+    if (!comp || !(comp instanceof CompItem)) return "Error: No active composition.";
+    var layers = comp.selectedLayers;
+    if (!layers || layers.length === 0) return "Error: Select at least one layer.";
+
+    var moved = 0, skipped = 0;
+    for (var i = 0; i < layers.length; i++) {
+        if (_mtagSetAnchorForLayer(layers[i], pos, comp.time)) moved++;
+        else skipped++;
+    }
+    if (moved === 0) return "Warning: No eligible layers (need visual bounds).";
+    if (skipped > 0) return "Warning: Anchor set on " + moved + " layer(s); skipped " + skipped + ".";
+    return "Success";
+}
+
+function _mtagSetAnchorForLayer(layer, pos, t) {
+    // Cameras/lights have no content bounds and no anchor-in-content concept.
+    var tg = layer.property("ADBE Transform Group");
+    if (!tg) return false;
+    var apP = tg.property("ADBE Anchor Point");
+    var posP = tg.property("ADBE Position");
+    if (!apP || !posP) return false;
+
+    var rect;
+    try { rect = layer.sourceRectAtTime(t, false); } catch (e) { return false; }
+    if (!rect || (rect.width === 0 && rect.height === 0)) return false;
+
+    var f = _mtagAnchorFractions(pos);
+    var targetX = rect.left + rect.width * f.fx;
+    var targetY = rect.top + rect.height * f.fy;
+
+    var curAnchor = apP.valueAtTime(t, false);
+    var dAx = targetX - curAnchor[0];
+    var dAy = targetY - curAnchor[1];
+    if (dAx === 0 && dAy === 0) return true; // already there
+
+    // Convert the anchor delta (layer space) into a comp-space Position delta
+    // using the layer's current scale and Z-rotation. Scale/rotation animation
+    // makes this exact only at the current time — the standard trade-off for
+    // this kind of tool.
+    var sx = 1, sy = 1, rot = 0;
+    var scaleP = tg.property("ADBE Scale");
+    if (scaleP) { var sv = scaleP.valueAtTime(t, false); sx = sv[0] / 100; sy = sv[1] / 100; }
+    var rotP = tg.property("ADBE Rotate_Z");
+    if (rotP) { try { rot = rotP.valueAtTime(t, false) * Math.PI / 180; } catch (e) {} }
+    var cos = Math.cos(rot), sin = Math.sin(rot);
+    var lx = dAx * sx, ly = dAy * sy;
+    var dPx = lx * cos - ly * sin;
+    var dPy = lx * sin + ly * cos;
+
+    // --- Anchor Point: shift value / every key by the layer-space delta ---
+    if (apP.numKeys > 0) {
+        for (var k = 1; k <= apP.numKeys; k++) {
+            var av = apP.keyValue(k);
+            apP.setValueAtKey(k, [av[0] + dAx, av[1] + dAy, av.length > 2 ? av[2] : 0]);
+        }
+    } else {
+        var av0 = apP.value;
+        apP.setValue([av0[0] + dAx, av0[1] + dAy, av0.length > 2 ? av0[2] : 0]);
+    }
+
+    // --- Position: shift by the comp-space delta (dimension-separated safe) ---
+    if (posP.dimensionsSeparated) {
+        _mtagOffsetScalar(tg.property("ADBE Position_0"), dPx);
+        _mtagOffsetScalar(tg.property("ADBE Position_1"), dPy);
+    } else if (posP.numKeys > 0) {
+        for (var j = 1; j <= posP.numKeys; j++) {
+            var pv = posP.keyValue(j);
+            posP.setValueAtKey(j, [pv[0] + dPx, pv[1] + dPy, pv.length > 2 ? pv[2] : 0]);
+        }
+    } else {
+        var pv0 = posP.value;
+        posP.setValue([pv0[0] + dPx, pv0[1] + dPy, pv0.length > 2 ? pv0[2] : 0]);
+    }
+    return true;
+}
+
+// --- STAGGER / SEQUENCE HELPER ---------------------------------------------
+// Two entry points, both called directly (not via executeAction) with a JSON
+// options blob and managing their own undo group:
+//   mtagStaggerArrange({ target })  -> align in-points / collapse keys
+//   mtagStagger({ type, offset, step }) -> cascade in time
+// Scope is auto: if any keyframes are selected we operate on keyframes,
+// otherwise on the selected layers.
+
+function _stagComp() {
+    var comp = app.project.activeItem;
+    if (!comp || !(comp instanceof CompItem)) return null;
+    return comp;
+}
+
+// Collect selected keyframes across the comp as { prop, index, time }.
+function _stagSelectedKeys(comp) {
+    var out = [];
+    var props = comp.selectedProperties;
+    for (var i = 0; i < props.length; i++) {
+        var p = props[i];
+        if (!p || !p.numKeys || p.selectedKeys.length === 0) continue;
+        var sel = p.selectedKeys;
+        for (var k = 0; k < sel.length; k++) {
+            out.push({ prop: p, index: sel[k], time: p.keyTime(sel[k]) });
+        }
+    }
+    return out;
+}
+
+// Order units per the chosen type. `key` extracts the sort scalar (layer.index
+// or keyframe time). Returns a new array; mutates nothing.
+function _stagOrder(units, type, keyFn) {
+    var arr = units.slice(0);
+    if (type === 'random') {
+        for (var i = arr.length - 1; i > 0; i--) {
+            var j = Math.floor(Math.random() * (i + 1));
+            var t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+        }
+        return arr;
+    }
+    arr.sort(function (a, b) { return keyFn(a) - keyFn(b); }); // top-to-bottom / earliest-first
+    if (type === 'bt') arr.reverse();
+    return arr;
+}
+
+function _stagResolveTarget(comp, target, selLayers, selKeys) {
+    if (target === 'compStart') return comp.displayStartTime;
+    if (target === 'firstInPoint') {
+        var min = null;
+        if (selKeys && selKeys.length) {
+            for (var k = 0; k < selKeys.length; k++)
+                if (min === null || selKeys[k].time < min) min = selKeys[k].time;
+        } else if (selLayers && selLayers.length) {
+            for (var l = 0; l < selLayers.length; l++)
+                if (min === null || selLayers[l].inPoint < min) min = selLayers[l].inPoint;
+        }
+        return min === null ? comp.time : min;
+    }
+    return comp.time; // 'cti'
+}
+
+// Apply new times to selected keyframes safely. Group by property and set the
+// highest-index key first so moving one never invalidates a not-yet-moved
+// lower index. `timeFor(unit)` returns the target time for each key unit.
+function _stagApplyKeyTimes(units, timeFor) {
+    // Bucket by property (identity via a tagged list — ExtendScript has no Map).
+    var buckets = [];
+    for (var i = 0; i < units.length; i++) {
+        var u = units[i];
+        var b = null;
+        for (var q = 0; q < buckets.length; q++) if (buckets[q].prop === u.prop) { b = buckets[q]; break; }
+        if (!b) { b = { prop: u.prop, items: [] }; buckets.push(b); }
+        b.items.push({ index: u.index, t: timeFor(u) });
+    }
+    for (var p = 0; p < buckets.length; p++) {
+        var items = buckets[p].items;
+        items.sort(function (a, b) { return b.index - a.index; }); // highest index first
+        for (var m = 0; m < items.length; m++) {
+            buckets[p].prop.setKeyTime(items[m].index, items[m].t);
+        }
+    }
+}
+
+function mtagStaggerArrange(optsJSON) {
+    var comp = _stagComp();
+    if (!comp) return "Error: No active composition.";
+    var opts;
+    try { opts = JSON.parse(optsJSON); } catch (e) { return "Error: Bad options."; }
+
+    var selKeys = _stagSelectedKeys(comp);
+    var selLayers = comp.selectedLayers;
+    var target = _stagResolveTarget(comp, opts.target, selLayers, selKeys);
+
+    app.beginUndoGroup("MTAG Arrange");
+    try {
+        if (selKeys.length > 0) {
+            // Collapse every selected key onto the target time.
+            _stagApplyKeyTimes(selKeys, function () { return target; });
+        } else if (selLayers && selLayers.length > 0) {
+            for (var i = 0; i < selLayers.length; i++) {
+                selLayers[i].startTime += target - selLayers[i].inPoint;
+            }
+        } else {
+            return "Error: Select layers or keyframes first.";
+        }
+    } catch (err) {
+        return "Error: " + err.toString();
+    } finally {
+        app.endUndoGroup();
+    }
+    return "Success";
+}
+
+function mtagStagger(optsJSON) {
+    var comp = _stagComp();
+    if (!comp) return "Error: No active composition.";
+    var opts;
+    try { opts = JSON.parse(optsJSON); } catch (e) { return "Error: Bad options."; }
+
+    var type = opts.type || 'tb';
+    var offset = Number(opts.offset); if (!isFinite(offset)) offset = 0;
+    var step = Math.max(1, Math.floor(Number(opts.step) || 1));
+    var fd = comp.frameDuration;
+
+    var selKeys = _stagSelectedKeys(comp);
+    var selLayers = comp.selectedLayers;
+
+    app.beginUndoGroup("MTAG Stagger");
+    try {
+        if (selKeys.length > 0) {
+            var ordered = _stagOrder(selKeys, type, function (u) { return u.time; });
+            var base = ordered[0].time;
+            var newTimes = []; // parallel to `ordered`
+            for (var i = 0; i < ordered.length; i++) {
+                newTimes[i] = base + Math.floor(i / step) * offset * fd;
+            }
+            // Map each ordered unit -> its computed time for the safe applier.
+            _stagApplyKeyTimes(ordered, function (u) {
+                for (var j = 0; j < ordered.length; j++) if (ordered[j] === u) return newTimes[j];
+                return u.time;
+            });
+        } else if (selLayers && selLayers.length > 0) {
+            var oL = _stagOrder(selLayers, type, function (l) { return l.index; });
+            var baseIn = oL[0].inPoint;
+            for (var n = 0; n < oL.length; n++) {
+                var newIn = baseIn + Math.floor(n / step) * offset * fd;
+                oL[n].startTime += newIn - oL[n].inPoint;
+            }
+        } else {
+            return "Error: Select layers or keyframes first.";
+        }
+    } catch (err) {
+        return "Error: " + err.toString();
+    } finally {
+        app.endUndoGroup();
+    }
+    return "Success";
 }
 
 // jsx/hostscript.jsx

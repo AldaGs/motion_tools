@@ -336,6 +336,7 @@ export default function DialogApp() {
 
   const handleRenameProfile = (id: string, name: string) => {
     if (!appData) return;
+    if (appData.profiles.find((p) => p.id === id)?.locked) return;
     writeProfiles(appData.profiles.map((p) => (p.id === id ? { ...p, name } : p)));
   };
 
@@ -364,6 +365,7 @@ export default function DialogApp() {
   const [confirmDeleteProfileId, setConfirmDeleteProfileId] = useState<string | null>(null);
   const handleDeleteProfile = (id: string) => {
     if (!appData) return;
+    if (appData.profiles.find((p) => p.id === id)?.locked) return toast.info("The Helpers profile is built-in and can't be removed.");
     if (appData.profiles.length <= 1) return toast.error("Can't delete the last profile.");
     setConfirmDeleteProfileId(id);
   };
@@ -663,6 +665,11 @@ export default function DialogApp() {
               </div>
             )}
             <input type="text" placeholder="Button Label" value={newMacro.label} onChange={(e) => updateMacro({ label: e.target.value })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }} />
+            {newMacro.type === 'builtin' ? (
+              <div style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', fontSize: '11px' }}>
+                🔒 Built-in helper (<code>{newMacro.payload}</code>). Type and action are fixed; you can still change the label, icon, color, tags and hotkey.
+              </div>
+            ) : (
             <select value={newMacro.type} onChange={(e) => updateMacro({ type: e.target.value as MacroType, payload: '' })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }}>
               <option value="menuCommand">Menu Command (ID)</option>
               <option value="expression">Expression Code</option>
@@ -670,7 +677,8 @@ export default function DialogApp() {
               <option value="ffx">Effect Preset (.ffx)</option>
               <option value="sequence">Sequence (Chain)</option>
             </select>
-            {newMacro.type === 'expression' ? (
+            )}
+            {newMacro.type === 'builtin' ? null : newMacro.type === 'expression' ? (
               <textarea rows={5} placeholder="Expression..." value={newMacro.payload} onChange={(e) => updateMacro({ payload: e.target.value })} style={{ padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)', fontFamily: 'monospace', resize: 'vertical' }} />
             ) : newMacro.type === 'sequence' ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
@@ -866,11 +874,14 @@ export default function DialogApp() {
                 return (
                   <div key={p.id} style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '8px', backgroundColor: 'var(--panel-bg-sunken)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-md)' }}>
                     <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                      {p.locked && <span title="Built-in profile — can't be renamed or removed" style={{ fontSize: '11px', color: 'var(--panel-fg-dim)' }}>🔒</span>}
                       <input
                         type="text"
                         value={p.name}
                         onChange={(e) => handleRenameProfile(p.id, e.target.value)}
-                        style={{ flex: 1, minWidth: 0, padding: '4px 6px', backgroundColor: 'var(--panel-bg)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', fontSize: '12px' }}
+                        readOnly={!!p.locked}
+                        title={p.locked ? "Built-in profile — name is fixed" : undefined}
+                        style={{ flex: 1, minWidth: 0, padding: '4px 6px', backgroundColor: 'var(--panel-bg)', color: p.locked ? 'var(--panel-fg-muted)' : 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', fontSize: '12px' }}
                       />
                       <button onClick={() => handleMoveProfile(p.id, -1)} disabled={idx === 0} title="Move up"
                         style={{ padding: '2px 6px', backgroundColor: 'transparent', color: idx === 0 ? 'var(--panel-fg-dim)' : 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: idx === 0 ? 'default' : 'pointer', fontSize: '11px' }}>↑</button>
@@ -891,8 +902,10 @@ export default function DialogApp() {
                       <span style={{ fontSize: '10px', color: 'var(--panel-fg-dim)', minWidth: '28px', textAlign: 'right' }}>{p.macros.length} ⚡</span>
                       <button onClick={() => handleDuplicateProfile(p.id)} title="Duplicate"
                         style={{ padding: '2px 6px', backgroundColor: 'transparent', color: 'var(--panel-fg-muted)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer', fontSize: '11px' }}>⎘</button>
-                      <button onClick={() => handleDeleteProfile(p.id)} title="Delete" disabled={appData.profiles.length <= 1}
-                        style={{ padding: '2px 6px', backgroundColor: 'transparent', color: appData.profiles.length <= 1 ? 'var(--panel-fg-dim)' : 'var(--danger)', border: `1px solid ${appData.profiles.length <= 1 ? 'var(--panel-border)' : 'var(--danger)'}`, borderRadius: 'var(--radius-sm)', cursor: appData.profiles.length <= 1 ? 'default' : 'pointer', fontSize: '11px' }}>×</button>
+                      {(() => { const delDisabled = appData.profiles.length <= 1 || !!p.locked; return (
+                      <button onClick={() => handleDeleteProfile(p.id)} title={p.locked ? "Built-in profile — can't be removed" : "Delete"} disabled={delDisabled}
+                        style={{ padding: '2px 6px', backgroundColor: 'transparent', color: delDisabled ? 'var(--panel-fg-dim)' : 'var(--danger)', border: `1px solid ${delDisabled ? 'var(--panel-border)' : 'var(--danger)'}`, borderRadius: 'var(--radius-sm)', cursor: delDisabled ? 'default' : 'pointer', fontSize: '11px' }}>×</button>
+                      ); })()}
                     </div>
                   </div>
                 );

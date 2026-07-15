@@ -1,6 +1,6 @@
 // src/types.ts
 
-export type MacroType = 'menuCommand' | 'expression' | 'script' | 'sequence' | 'ffx';
+export type MacroType = 'menuCommand' | 'expression' | 'script' | 'sequence' | 'ffx' | 'builtin';
 
 export interface Macro {
   id: string;
@@ -44,6 +44,10 @@ export interface Profile {
   name: string;
   autoTriggerContext: ProfileContext;
   macros: Macro[];
+  /** System profile that ships with the panel (e.g. "Helpers"). Locked
+   * profiles can't be deleted or renamed in the editor, and are re-seeded on
+   * load if a user's config predates them. */
+  locked?: boolean;
 }
 
 export interface BezierPoint {
@@ -67,6 +71,29 @@ export interface EasingProfile {
   id: string;
   name: string;
   eases: CustomEase[];
+}
+
+/** Direction the stagger tool cascades in. `tb` top→bottom, `bt` bottom→top. */
+export type StaggerType = 'tb' | 'bt' | 'random';
+
+export interface StaggerSettings {
+  type: StaggerType;
+  /** Gap between successive elements, in frames. */
+  offset: number;
+  /** How many elements share each step (1 = every element cascades). */
+  step: number;
+}
+
+/** Per-panel view state, keyed by CEP extension id (e.g. the "main" toolbar
+ * vs the "secondary" panel). Lets each panel instance pick its own profile /
+ * pin independently even though they share one config file. */
+export interface PanelState {
+  /** The profile this panel shows in non-context mode / as its edit target. */
+  activeProfileId?: string;
+  /** Manual override profile for this panel (null = none). */
+  overrideProfileId?: string | null;
+  /** Whether this panel is pinned to the Helpers profile. */
+  pinHelpers?: boolean;
 }
 
 export interface Settings {
@@ -99,6 +126,13 @@ export interface Settings {
   lockMacros?: boolean;
   /** Size of the per-panel undo ring buffer. Defaults to 10. */
   undoHistorySize?: number;
+  /** Persisted state for the Helpers "Stagger" tool. */
+  stagger?: StaggerSettings;
+  /** @deprecated Global pin — superseded by per-panel `panels[id].pinHelpers`.
+   * Read once as a migration fallback. */
+  pinHelpers?: boolean;
+  /** Per-panel view/pin state, keyed by CEP extension id. */
+  panels?: Record<string, PanelState>;
 }
 
 export interface AppData {

@@ -12,6 +12,32 @@ declare global {
   }
 }
 
+/** Id of the locked, panel-shipped "Helpers" profile. Kept stable so the
+ * migration can detect and re-seed it. */
+export const HELPERS_PROFILE_ID = 'profile-helpers';
+
+// A 3×3 anchor-point grid backed by the `builtin` macro type. Payloads map to
+// _mtagRunBuiltin("anchor:<pos>") in jsx/hostscript.jsx. Kept out-of-context
+// ('none') so it never auto-shows over "Global Tools" — reached via the
+// secondary/override toolbar when needed.
+export const buildHelpersProfile = () => ({
+  id: HELPERS_PROFILE_ID,
+  name: 'Helpers',
+  autoTriggerContext: 'none' as const,
+  locked: true,
+  macros: [
+    { id: 'hlp-anchor-tl', label: '↖', type: 'builtin' as const, payload: 'anchor:tl', color: '#5b6470', tags: ['anchor', 'top', 'left'] },
+    { id: 'hlp-anchor-tc', label: '↑', type: 'builtin' as const, payload: 'anchor:tc', color: '#5b6470', tags: ['anchor', 'top', 'center'] },
+    { id: 'hlp-anchor-tr', label: '↗', type: 'builtin' as const, payload: 'anchor:tr', color: '#5b6470', tags: ['anchor', 'top', 'right'] },
+    { id: 'hlp-anchor-ml', label: '←', type: 'builtin' as const, payload: 'anchor:ml', color: '#5b6470', tags: ['anchor', 'middle', 'left'] },
+    { id: 'hlp-anchor-mc', label: '•', type: 'builtin' as const, payload: 'anchor:mc', color: '#7c4dff', tags: ['anchor', 'center'] },
+    { id: 'hlp-anchor-mr', label: '→', type: 'builtin' as const, payload: 'anchor:mr', color: '#5b6470', tags: ['anchor', 'middle', 'right'] },
+    { id: 'hlp-anchor-bl', label: '↙', type: 'builtin' as const, payload: 'anchor:bl', color: '#5b6470', tags: ['anchor', 'bottom', 'left'] },
+    { id: 'hlp-anchor-bc', label: '↓', type: 'builtin' as const, payload: 'anchor:bc', color: '#5b6470', tags: ['anchor', 'bottom', 'center'] },
+    { id: 'hlp-anchor-br', label: '↘', type: 'builtin' as const, payload: 'anchor:br', color: '#5b6470', tags: ['anchor', 'bottom', 'right'] },
+  ],
+});
+
 export const defaultProfile: AppData = {
   activeProfileId: "profile-1",
   settings: {
@@ -41,6 +67,8 @@ export const defaultProfile: AppData = {
     commandPaletteHotkey: 'Ctrl+Space',
     lockMacros: false,
     undoHistorySize: 10,
+    stagger: { type: 'tb', offset: 10, step: 2 },
+    pinHelpers: false,
   },
   profiles: [
     {
@@ -67,7 +95,8 @@ export const defaultProfile: AppData = {
       macros: [
         { id: "m4", label: "Group Shapes", type: "menuCommand", payload: "3741", color: "#9b59b6" }
       ]
-    }
+    },
+    buildHelpersProfile(),
   ]
 };
 
@@ -189,7 +218,7 @@ const splitSettings = (settings: AppData['settings']) => {
 // config on a single bad macro — a corrupted file should still leave the
 // user with a usable panel.
 
-const VALID_MACRO_TYPES = new Set(['menuCommand', 'expression', 'script', 'sequence', 'ffx']);
+const VALID_MACRO_TYPES = new Set(['menuCommand', 'expression', 'script', 'sequence', 'ffx', 'builtin']);
 
 /** Per-load counters surfaced to the UI so users know when something got
  * silently coerced or dropped. Reset on each `loadConfig` call. */
@@ -251,6 +280,7 @@ const sanitizeProfile = (raw: any): any | null => {
     name: typeof raw.name === 'string' ? raw.name : 'Untitled',
     autoTriggerContext: typeof raw.autoTriggerContext === 'string' ? raw.autoTriggerContext : 'none',
     macros,
+    locked: raw.locked === true ? true : undefined,
   };
 };
 
@@ -282,6 +312,18 @@ const sanitizeProfiles = (raw: any): any[] | null => {
   if (!Array.isArray(raw)) return null;
   const out = raw.map(sanitizeProfile).filter(Boolean);
   return out.length > 0 ? out : null;
+};
+
+/** Guarantee the locked "Helpers" profile is present. Appends it for configs
+ * that predate it; forces the `locked` flag on if a saved copy lost it. Does
+ * not overwrite the user's macros/order for an existing Helpers profile. */
+const ensureHelpersProfile = (profiles: any[]): any[] => {
+  const existing = profiles.find((p) => p && p.id === HELPERS_PROFILE_ID);
+  if (existing) {
+    if (existing.locked !== true) existing.locked = true;
+    return profiles;
+  }
+  return [...profiles, buildHelpersProfile()];
 };
 
 export const loadConfig = (): AppData => {
@@ -374,7 +416,9 @@ export const loadConfig = (): AppData => {
     settings.customEases = active ? active.eases : [];
 
     // Strip malformed profile/macro entries instead of crashing the panel.
-    const sanitizedProfiles = sanitizeProfiles(macroData?.profiles) ?? defaultProfile.profiles;
+    const sanitizedProfiles = ensureHelpersProfile(
+      sanitizeProfiles(macroData?.profiles) ?? defaultProfile.profiles,
+    );
     const activeProfileId =
       typeof macroData?.activeProfileId === 'string'
       && sanitizedProfiles.some((p: any) => p.id === macroData.activeProfileId)
