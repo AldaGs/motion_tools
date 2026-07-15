@@ -49,3 +49,16 @@ html, body, #root {
 button {
   font-family: inherit;
 }
+
+/* Hide scrollbars across every MTAG panel while keeping scroll functional.
+   Panels are hosted in CEF (Chromium), so the WebKit pseudo-element removes
+   the visible bar; scrollbar-width covers any non-WebKit host. */
+* {
+  scrollbar-width: none;          /* Firefox / non-WebKit */
+  -ms-overflow-style: none;       /* legacy Edge */
+}
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
