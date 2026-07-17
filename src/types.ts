@@ -92,7 +92,10 @@ export interface PanelState {
   activeProfileId?: string;
   /** Manual override profile for this panel (null = none). */
   overrideProfileId?: string | null;
-  /** Whether this panel is pinned to the Helpers profile. */
+  /** The profile this panel is pinned to (null/undefined = not pinned). */
+  pinnedProfileId?: string | null;
+  /** @deprecated Helpers-only pin — superseded by `pinnedProfileId`.
+   * Read once as a migration fallback. */
   pinHelpers?: boolean;
 }
 
@@ -128,7 +131,7 @@ export interface Settings {
   undoHistorySize?: number;
   /** Persisted state for the Helpers "Stagger" tool. */
   stagger?: StaggerSettings;
-  /** @deprecated Global pin — superseded by per-panel `panels[id].pinHelpers`.
+  /** @deprecated Global pin — superseded by per-panel `panels[id].pinnedProfileId`.
    * Read once as a migration fallback. */
   pinHelpers?: boolean;
   /** Per-panel view/pin state, keyed by CEP extension id. */

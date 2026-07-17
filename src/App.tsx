@@ -510,15 +510,18 @@ function App() {
   // looking at. The auto-context heartbeat is paused while editing, so the
   // resolution stays stable through the edit session.
   const panelState = appData.settings.panels?.[panelKey] ?? {};
-  const panelPinned = panelState.pinHelpers ?? appData.settings.pinHelpers ?? false;
-  let profileToShow: Profile | undefined;
-  const pinnedHelpers = !isEditMode && panelPinned
-    ? appData.profiles.find((p) => p.id === HELPERS_PROFILE_ID)
+  // Legacy configs only stored a boolean Helpers pin; map it onto the id.
+  const pinnedProfileId = panelState.pinnedProfileId
+    ?? ((panelState.pinHelpers ?? appData.settings.pinHelpers) ? HELPERS_PROFILE_ID : null);
+  const pinnedProfile = !isEditMode && pinnedProfileId
+    ? appData.profiles.find((p) => p.id === pinnedProfileId)
     : undefined;
-  if (pinnedHelpers) {
-    // Highest precedence: a pinned Helpers view ignores auto-context and any
+  const panelPinned = !!pinnedProfile;
+  let profileToShow: Profile | undefined;
+  if (pinnedProfile) {
+    // Highest precedence: a pinned view ignores auto-context and any
     // manual override so a layer selection can't switch it away.
-    profileToShow = pinnedHelpers;
+    profileToShow = pinnedProfile;
   } else if (overrideProfileId) {
     profileToShow = appData.profiles.find((p) => p.id === overrideProfileId);
   } else if (!appData.settings.enableContext) {
@@ -556,7 +559,7 @@ function App() {
     // the chosen profile as this panel's non-context / edit target. Does NOT
     // touch the global activeProfileId, so the other panel is unaffected.
     setOverrideProfileId(selectedId);
-    writePanel({ activeProfileId: selectedId, overrideProfileId: selectedId, pinHelpers: false });
+    writePanel({ activeProfileId: selectedId, overrideProfileId: selectedId, pinnedProfileId: null, pinHelpers: false });
   };
 
   if (view === 'dialog') {
@@ -624,15 +627,16 @@ function App() {
     saveConfig(nd);
   };
 
-  // Pin / unpin the Helpers profile as the active view (per panel).
-  const togglePinHelpers = () => {
+  // Pin / unpin the currently visible profile as this panel's active view.
+  const togglePin = () => {
     if (!appData) return;
-    const pin = !(appData.settings.panels?.[panelKey]?.pinHelpers ?? false);
+    const pin = panelPinned ? null : profileToShow.id;
     // Dropping a manual override on pin avoids a stale [Manual] badge fighting
     // the pin once it's turned back off.
     if (pin) setOverrideProfileId(null);
-    writePanel({ pinHelpers: pin, ...(pin ? { overrideProfileId: null } : {}) });
-    toast.info(pin ? 'Helpers pinned.' : 'Helpers unpinned.');
+    // pinHelpers is cleared so the legacy fallback can't resurrect the old pin.
+    writePanel({ pinnedProfileId: pin, pinHelpers: false, ...(pin ? { overrideProfileId: null } : {}) });
+    toast.info(pin ? `${profileToShow.name} pinned.` : 'Profile unpinned.');
   };
 
   // Persist the Helpers "Stagger" tool state.
@@ -749,7 +753,7 @@ function App() {
                 </select>
 
                 {!isEditMode && panelPinned ? (
-                  <span style={{ fontSize: '10px', color: 'var(--accent)', flexShrink: 0 }} title="Helpers pinned — auto/manual switching is paused">
+                  <span style={{ fontSize: '10px', color: 'var(--accent)', flexShrink: 0 }} title={`${profileToShow.name} pinned — auto/manual switching is paused`}>
                     [Pinned]
                   </span>
                 ) : (!isEditMode && appData.settings.enableContext && (
@@ -760,7 +764,7 @@ function App() {
               </div>
 
               <div style={{ display: 'flex', gap: '5px', flexShrink: 0 }}>
-                <button onClick={togglePinHelpers} title={panelPinned ? 'Unpin Helpers (resume auto/manual)' : 'Pin Helpers as the active profile'} style={{ padding: '4px 8px', fontSize: '11px', cursor: 'pointer', backgroundColor: panelPinned ? 'var(--accent)' : 'var(--panel-bg-elev)', color: panelPinned ? '#fff' : 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)' }}>
+                <button onClick={togglePin} title={panelPinned ? `Unpin ${profileToShow.name} (resume auto/manual)` : `Pin ${profileToShow.name} as the active profile`} style={{ padding: '4px 8px', fontSize: '11px', cursor: 'pointer', backgroundColor: panelPinned ? 'var(--accent)' : 'var(--panel-bg-elev)', color: panelPinned ? '#fff' : 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)' }}>
                   📌
                 </button>
                 <button onClick={handleToggleEdit} title={appData.settings.lockMacros ? 'Locked — toggle in Settings' : (isEditMode ? 'Exit edit mode' : 'Edit')} style={{ padding: '4px 8px', fontSize: '11px', cursor: appData.settings.lockMacros ? 'not-allowed' : 'pointer', backgroundColor: isEditMode ? 'var(--danger)' : 'var(--panel-bg-elev)', color: appData.settings.lockMacros ? 'var(--panel-fg-dim)' : 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', opacity: appData.settings.lockMacros ? 0.6 : 1 }}>
