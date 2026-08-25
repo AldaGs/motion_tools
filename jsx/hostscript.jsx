@@ -465,6 +465,38 @@ function mtagStagger(optsJSON) {
 
 // jsx/hostscript.jsx
 
+// AE stores keyframe speed in the property's own units per second. For COLOR
+// properties the scripting API hands us 0..1 floats, but the speed values AE
+// keeps internally live in the project's working bit depth. Getting this wrong
+// scales every colour handle by ~128x or ~255x, which is why a colour ease
+// either flattens to linear or overshoots wildly on non-8bpc projects.
+function _colorSpeedMultiplier() {
+    var bpc = 8;
+    try { bpc = app.project.bitsPerChannel; } catch (e) {}
+    if (bpc === 16) return 32768;
+    if (bpc === 32) return 1;
+    return 255;
+}
+
+// Squared-distance helper shared by the spatial and colour paths.
+function _euclidDist(v1, v2) {
+    var sumSq = 0;
+    for (var i = 0; i < v1.length; i++) sumSq += Math.pow(v2[i] - v1[i], 2);
+    return Math.sqrt(sumSq);
+}
+
+// How many KeyframeEase slots AE actually expects for this property. Asking AE
+// is the only reliable answer — deriving it from keyValue().length is what
+// broke COLOR (4 channels in the value, but not necessarily 4 ease slots), and
+// a length mismatch makes setTemporalEaseAtKey throw.
+function _easeSlotCount(prop, atKey) {
+    try {
+        var existing = prop.keyOutTemporalEase(atKey);
+        if (existing && existing.length) return existing.length;
+    } catch (e) {}
+    return 1;
+}
+
 // Helper used by both the >=2-key path and the single-key path. Builds a
 // per-dimension KeyframeEase array given a "from" and "to" key on the same
 // property, the shared influence/rate values, and which side ('out' or 'in')
@@ -478,16 +510,27 @@ function _buildEaseArrayForSegment(prop, fromKey, toKey, rate, influence) {
     var vt = prop.propertyValueType;
     var isSpatial = (vt === PropertyValueType.TwoD_SPATIAL ||
                      vt === PropertyValueType.ThreeD_SPATIAL);
-    
+    var isColor   = (vt === PropertyValueType.COLOR);
+
     var arr = [];
     if (isSpatial) {
         // Combined spatial properties (like Position) have only ONE temporal dimension for easing
-        var sumSq = 0;
-        for (var i = 0; i < v1.length; i++) sumSq += Math.pow(v2[i] - v1[i], 2);
-        var dist = Math.sqrt(sumSq);
+        var dist = _euclidDist(v1, v2);
         var speed = rate * (dist / dt);
         if (!isFinite(speed)) speed = 0;
         arr.push(new KeyframeEase(speed, influence));
+    } else if (isColor) {
+        // Colour is treated like Position: a single perceptual timing derived
+        // from the RGBA-space distance, rather than one ease per channel.
+        // Per-channel easing is meaningless to a user (you don't time red
+        // separately from blue) and it divided by zero on any channel that
+        // held still — e.g. a hue shift where alpha never moves.
+        var cDist = _euclidDist(v1, v2) * _colorSpeedMultiplier();
+        var cSpeed = rate * (cDist / dt);
+        if (!isFinite(cSpeed)) cSpeed = 0;
+        // Write the same ease into every slot AE exposes for this property.
+        var slots = _easeSlotCount(prop, fromKey);
+        for (var c = 0; c < slots; c++) arr.push(new KeyframeEase(cSpeed, influence));
     } else {
         // Non-spatial properties (OneD, TwoD like Scale, ThreeD, etc.)
         // Drawing logic from Flow (curves.jsx):
@@ -497,15 +540,14 @@ function _buildEaseArrayForSegment(prop, fromKey, toKey, rate, influence) {
             vt === PropertyValueType.NO_VALUE) {
             arr.push(new KeyframeEase(rate, influence));
         } else {
+            // COLOR is handled above; everything reaching here is a plain
+            // scalar or per-axis property (Scale, Rotation, Opacity, …).
             var isMulti = (v1 instanceof Array);
             var dimCount = isMulti ? v1.length : 1;
-            
-            // For COLOR, AE internal easing units are often scaled by 255 (matching Flow)
-            var multiplier = (vt === PropertyValueType.COLOR) ? 255 : 1;
-            
+
             for (var d = 0; d < dimCount; d++) {
                 var dv_d = isMulti ? (v2[d] - v1[d]) : (v2 - v1);
-                var speed_d = rate * (dv_d / dt) * multiplier;
+                var speed_d = rate * (dv_d / dt);
                 if (!isFinite(speed_d)) speed_d = 0;
                 arr.push(new KeyframeEase(speed_d, influence));
             }
@@ -679,7 +721,9 @@ function _round3(v) { return Math.round(v * 1000) / 1000; }
 //   1. Shape / Custom / NoValue — speed IS the rate; no value-delta involved.
 //   2. Spatial (2D/3D Position) — single temporal ease; avgSpeed uses
 //      Euclidean distance, NOT per-component delta.
-//   3. Everything else (Scale, Rotation, Color, etc.) — one ease per axis;
+//   2b. Color — same distance-based treatment as spatial, in RGBA space,
+//      scaled by the project's working bit depth.
+//   3. Everything else (Scale, Rotation, etc.) — one ease per axis;
 //      pick the axis with the largest |dv| to avoid divide-by-zero.
 function _readSegmentBezier(prop, key1, key2) {
     var dt = prop.keyTime(key2) - prop.keyTime(key1);
@@ -713,9 +757,7 @@ function _readSegmentBezier(prop, key1, key2) {
     // avgSpeed = distance / dt.  Using per-component delta here would
     // scale y1/y2 incorrectly on diagonal movements.
     if (isSpatial) {
-        var sumSq = 0;
-        for (var i = 0; i < v1.length; i++) sumSq += Math.pow(v2[i] - v1[i], 2);
-        var dist = Math.sqrt(sumSq);
+        var dist = _euclidDist(v1, v2);
         if (dist === 0) return null;
         var avgSpeed = dist / dt;
 
@@ -735,6 +777,29 @@ function _readSegmentBezier(prop, key1, key2) {
         return [x1, y1, x2, y2];
     }
 
+    // --- Path 2b: Colour ---
+    // Mirrors the colour branch in _buildEaseArrayForSegment: one ease derived
+    // from RGBA-space distance, scaled into the project's working bit depth.
+    if (isColor) {
+        var cDist = _euclidDist(v1, v2) * _colorSpeedMultiplier();
+        if (cDist === 0) return null;
+        var cAvgSpeed = cDist / dt;
+
+        var cOutArr = prop.keyOutTemporalEase(key1);
+        var cInArr  = prop.keyInTemporalEase(key2);
+        var cEaseOut = cOutArr[0];
+        var cEaseIn  = cInArr[0];
+
+        var cx1 = cEaseOut.influence / 100;
+        var cy1 = (cEaseOut.speed * cx1) / cAvgSpeed;
+        var cx2 = 1 - (cEaseIn.influence / 100);
+        var cy2 = 1 - ((cEaseIn.speed * (1 - cx2)) / cAvgSpeed);
+
+        cx1 = Math.max(0, Math.min(1, cx1));
+        cx2 = Math.max(0, Math.min(1, cx2));
+        return [cx1, cy1, cx2, cy2];
+    }
+
     // --- Path 3: Non-spatial multi-dim or scalar properties ---
     // Pick the dimension with the largest |dv| — that's the axis carrying
     // the dominant motion, and avoids divide-by-zero on a near-static axis
@@ -752,9 +817,9 @@ function _readSegmentBezier(prop, key1, key2) {
         }
     }
 
-    var multiplier = isColor ? 255 : 1;
+    // COLOR is handled in Path 2b above.
     var dv = isMulti ? (v2[bestDim] - v1[bestDim]) : (v2 - v1);
-    var avgSpeed = (dv / dt) * multiplier;
+    var avgSpeed = dv / dt;
 
     if (bestAbsDv === 0 || avgSpeed === 0) return null;
 
