@@ -60,7 +60,9 @@ function readVersion() {
 }
 
 function writeVersion(next) {
-  if (!/^\d+\.\d+\.\d+$/.test(next)) fail(`--version must be x.y.z, got "${next}"`);
+  // CEP's ExtensionBundleVersion accepts up to four parts, so a patch-of-a-patch
+  // like 1.0.6.1 is legal here as well as x.y.z.
+  if (!/^\d+\.\d+\.\d+(\.\d+)?$/.test(next)) fail(`--version must be x.y.z[.w], got "${next}"`);
   const xml = fs.readFileSync(MANIFEST, 'utf8')
     .replace(/(ExtensionBundleVersion=")[^"]+(")/, `$1${next}$2`);
   fs.writeFileSync(MANIFEST, xml, 'utf8');

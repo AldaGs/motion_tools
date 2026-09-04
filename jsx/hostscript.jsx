@@ -435,10 +435,13 @@ function mtagStagger(optsJSON) {
     try {
         if (selKeys.length > 0) {
             var ordered = _stagOrder(selKeys, type, function (u) { return u.time; });
-            var base = ordered[0].time;
             var newTimes = []; // parallel to `ordered`
             for (var i = 0; i < ordered.length; i++) {
-                newTimes[i] = base + Math.floor(i / step) * offset * fd;
+                // Shift each key RELATIVE to where it already sits rather than
+                // rebuilding times from the first key. That makes the button
+                // cumulative — three presses at offset 1 leave 3 frames between
+                // neighbours — and preserves any spacing already in place.
+                newTimes[i] = ordered[i].time + Math.floor(i / step) * offset * fd;
             }
             // Map each ordered unit -> its computed time for the safe applier.
             _stagApplyKeyTimes(ordered, function (u) {
@@ -447,10 +450,11 @@ function mtagStagger(optsJSON) {
             });
         } else if (selLayers && selLayers.length > 0) {
             var oL = _stagOrder(selLayers, type, function (l) { return l.index; });
-            var baseIn = oL[0].inPoint;
             for (var n = 0; n < oL.length; n++) {
-                var newIn = baseIn + Math.floor(n / step) * offset * fd;
-                oL[n].startTime += newIn - oL[n].inPoint;
+                // Relative shift, same reasoning as the keyframe branch above:
+                // the leading layer stays put and each press adds one more
+                // `offset` to everything behind it.
+                oL[n].startTime += Math.floor(n / step) * offset * fd;
             }
         } else {
             return "Error: Select layers or keyframes first.";

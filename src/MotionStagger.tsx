@@ -100,7 +100,8 @@ export default function MotionStagger({ value, onChange }: Props) {
         <button
           style={{ ...btn, flex: '1 1 88px', minWidth: '72px' }}
           onClick={runStagger}
-          title="Cascade selected layers / keyframes in time"
+          title="Cascade selected layers / keyframes in time
+Repeat to add more offset (x2 = double the spacing)"
         >
           SEQUENCE
         </button>

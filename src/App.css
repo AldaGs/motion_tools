@@ -20,7 +20,10 @@ button:active:not(:disabled) {
 }
 
 .mt-press {
-  transition: transform 90ms ease-out, box-shadow 120ms ease-out, filter 120ms ease-out;
+  /* Release is the bouncy half: the overshooting curve makes the tile pop
+     back past its rest size so a click reads clearly even on fast taps. */
+  transition: transform 260ms cubic-bezier(0.2, 1.7, 0.35, 1),
+              box-shadow 120ms ease-out, filter 120ms ease-out;
 }
 
 .mt-press:hover {
@@ -28,7 +31,59 @@ button:active:not(:disabled) {
 }
 
 .mt-press:active {
-  transform: scale(0.97);
+  /* Press-in stays snappy and linear-ish; only the release bounces. */
+  transform: scale(0.9);
+  transition-duration: 70ms;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mt-press,
+  .mt-press:active {
+    transition-duration: 90ms;
+    transition-timing-function: ease-out;
+  }
+  .mt-press:active { transform: scale(0.97); }
+}
+
+/* --- panel header ---
+   The panel docks as narrow as ~180px in AE. Wrapping the title row above
+   the action buttons (instead of letting them collide) is what keeps the
+   profile name readable at reduced width. */
+.mt-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 8px;
+  padding: 8px 10px;
+  background-color: var(--panel-bg-sunken);
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.mt-header-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 110px;
+  min-width: 0;
+}
+
+/* A <select> has an intrinsic min-content width that ignores flex-shrink,
+   so it needs min-width:0 + width:100% to actually give way. */
+.mt-header-title select {
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mt-header-actions {
+  display: flex;
+  gap: 5px;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 /* --- macro tile (static layout) ---

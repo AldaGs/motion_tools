@@ -734,15 +734,15 @@ function App() {
         {/* Header content varies per view */}
         {view === 'macros' && (
           <>
-            <div style={{ padding: '10px 15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: 'var(--panel-bg-sunken)', borderBottom: '1px solid var(--panel-border)' }}>
-            
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
+            <div className="mt-header">
+
+              <div className="mt-header-title">
                 <select
                   value={profileToShow.id}
                   onChange={handleProfileSelect}
                   style={{
                     backgroundColor: 'transparent', color: 'var(--panel-fg)', fontSize: '14px', fontWeight: 'bold',
-                    border: 'none', cursor: 'pointer', outline: 'none', flexShrink: 1, textOverflow: 'ellipsis'
+                    border: 'none', cursor: 'pointer', outline: 'none', padding: 0
                   }}
                 >
                   {appData.profiles.map((p) => (
@@ -763,7 +763,7 @@ function App() {
                 ))}
               </div>
 
-              <div style={{ display: 'flex', gap: '5px', flexShrink: 0 }}>
+              <div className="mt-header-actions">
                 <button onClick={togglePin} title={panelPinned ? `Unpin ${profileToShow.name} (resume auto/manual)` : `Pin ${profileToShow.name} as the active profile`} style={{ padding: '4px 8px', fontSize: '11px', cursor: 'pointer', backgroundColor: panelPinned ? 'var(--accent)' : 'var(--panel-bg-elev)', color: panelPinned ? '#fff' : 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)' }}>
                   📌
                 </button>

@@ -100,8 +100,8 @@ const args = parseArgs();
 if (!has('gh')) {
   fail('GitHub CLI not found. Install it (winget install GitHub.cli) then run `gh auth login`.');
 }
-if (args.setVersion && !/^\d+\.\d+\.\d+$/.test(args.setVersion)) {
-  fail(`--version must be x.y.z, got "${args.setVersion}"`);
+if (args.setVersion && !/^\d+\.\d+\.\d+(\.\d+)?$/.test(args.setVersion)) {
+  fail(`--version must be x.y.z[.w], got "${args.setVersion}"`);
 }
 
 const cfg = loadConfig();
