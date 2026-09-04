@@ -497,6 +497,33 @@ function _easeSlotCount(prop, atKey) {
     return 1;
 }
 
+// True only for leaf properties we can actually ease. comp.selectedProperties
+// hands back property GROUPS too — selecting a Slider inside an effect also
+// reports the effect group and the "Effects" group — and those have no
+// canVaryOverTime / selectedKeys at all.
+function _isEasableProp(p) {
+    try {
+        if (!p) return false;
+        if (p.propertyType !== PropertyType.PROPERTY) return false;
+        if (!p.canVaryOverTime) return false;
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
+// setTemporalEaseAtKey throws on ANY length mismatch, and the number of ease
+// slots AE exposes is not always the value's dimension count — effect controls
+// in particular can hold a single combined ease for a multi-dimensional value.
+// Stretch or trim the array we built to whatever AE is actually asking for.
+function _fitEaseArray(arr, slots) {
+    if (!arr || !arr.length) return arr;
+    if (arr.length === slots) return arr;
+    var out = [];
+    for (var i = 0; i < slots; i++) out.push(arr[i < arr.length ? i : arr.length - 1]);
+    return out;
+}
+
 // Helper used by both the >=2-key path and the single-key path. Builds a
 // per-dimension KeyframeEase array given a "from" and "to" key on the same
 // property, the shared influence/rate values, and which side ('out' or 'in')
@@ -504,13 +531,23 @@ function _easeSlotCount(prop, atKey) {
 function _buildEaseArrayForSegment(prop, fromKey, toKey, rate, influence) {
     var dt = prop.keyTime(toKey) - prop.keyTime(fromKey);
     if (dt === 0) return null;
-    var v1 = prop.keyValue(fromKey);
-    var v2 = prop.keyValue(toKey);
-    
+
     var vt = prop.propertyValueType;
     var isSpatial = (vt === PropertyValueType.TwoD_SPATIAL ||
                      vt === PropertyValueType.ThreeD_SPATIAL);
     var isColor   = (vt === PropertyValueType.COLOR);
+    var isOpaque  = (vt === PropertyValueType.SHAPE ||
+                     vt === PropertyValueType.CUSTOM_VALUE ||
+                     vt === PropertyValueType.NO_VALUE);
+
+    // keyValue() THROWS on CUSTOM_VALUE properties (Curves, Levels' histogram,
+    // any effect with a custom UI) and is meaningless for SHAPE/NO_VALUE, so it
+    // must not be read until we know the branch actually needs a delta.
+    var v1 = null, v2 = null;
+    if (!isOpaque) {
+        v1 = prop.keyValue(fromKey);
+        v2 = prop.keyValue(toKey);
+    }
 
     var arr = [];
     if (isSpatial) {
@@ -544,16 +581,26 @@ function _buildEaseArrayForSegment(prop, fromKey, toKey, rate, influence) {
             // scalar or per-axis property (Scale, Rotation, Opacity, …).
             var isMulti = (v1 instanceof Array);
             var dimCount = isMulti ? v1.length : 1;
+            var nSlots = _easeSlotCount(prop, fromKey);
 
-            for (var d = 0; d < dimCount; d++) {
-                var dv_d = isMulti ? (v2[d] - v1[d]) : (v2 - v1);
-                var speed_d = rate * (dv_d / dt);
-                if (!isFinite(speed_d)) speed_d = 0;
-                arr.push(new KeyframeEase(speed_d, influence));
+            if (isMulti && nSlots === 1) {
+                // A multi-dimensional value carrying ONE combined ease (some
+                // effect controls, e.g. a Point Control that isn't dimension-
+                // separated). Time it off the vector distance, like Position.
+                var mSpeed = rate * (_euclidDist(v1, v2) / dt);
+                if (!isFinite(mSpeed)) mSpeed = 0;
+                arr.push(new KeyframeEase(mSpeed, influence));
+            } else {
+                for (var d = 0; d < dimCount; d++) {
+                    var dv_d = isMulti ? (v2[d] - v1[d]) : (v2 - v1);
+                    var speed_d = rate * (dv_d / dt);
+                    if (!isFinite(speed_d)) speed_d = 0;
+                    arr.push(new KeyframeEase(speed_d, influence));
+                }
             }
         }
     }
-    return arr;
+    return _fitEaseArray(arr, _easeSlotCount(prop, fromKey));
 }
 
 // applyMode: 'both' | 'in' | 'out'
@@ -588,7 +635,9 @@ function applyBezierToSelection(bezierString, applyMode) {
 
         for (var i = 0; i < props.length; i++) {
             var prop = props[i];
-            if (!prop.canVaryOverTime) continue;
+            // Skips the effect / group entries AE includes alongside the leaf
+            // property when you select a keyframe inside an effect.
+            if (!_isEasableProp(prop)) continue;
 
             var outInfluence = Math.max(0.1, Math.min(100, x1 * 100));
             var inInfluence  = Math.max(0.1, Math.min(100, (1 - x2) * 100));
@@ -675,8 +724,17 @@ function readEaseFromSelection() {
         var comp = app.project.activeItem;
         if (!comp || comp.selectedProperties.length === 0) return null;
 
-        var prop = comp.selectedProperties[0];
-        if (!prop.canVaryOverTime) return null;
+        // Take the first LEAF property that actually has keys selected. Using
+        // selectedProperties[0] blindly reads the effect group (or a sibling
+        // property with no selected keys) whenever the user picked an effect
+        // parameter, which is why those read back as "unsupported".
+        var prop = null;
+        var sel = comp.selectedProperties;
+        for (var si = 0; si < sel.length; si++) {
+            if (!_isEasableProp(sel[si])) continue;
+            if (sel[si].selectedKeys.length > 0) { prop = sel[si]; break; }
+        }
+        if (!prop) return null;
 
         if (prop.selectedKeys.length >= 2) {
             var key1 = prop.selectedKeys[0];
@@ -734,8 +792,13 @@ function _readSegmentBezier(prop, key1, key2) {
     var isSpatial = (vt === PropertyValueType.TwoD_SPATIAL || vt === PropertyValueType.ThreeD_SPATIAL);
     var isColor   = (vt === PropertyValueType.COLOR);
 
-    var v1 = prop.keyValue(key1);
-    var v2 = prop.keyValue(key2);
+    // Deferred for the same reason as in _buildEaseArrayForSegment: keyValue()
+    // throws on CUSTOM_VALUE (Curves and friends), and Path 1 never needs it.
+    var v1 = null, v2 = null;
+    if (!isShape) {
+        v1 = prop.keyValue(key1);
+        v2 = prop.keyValue(key2);
+    }
 
     // --- Path 1: Shape / Custom / NoValue ---
     // Speed stored in AE *is* the bezier rate; no delta normalisation.
@@ -806,10 +869,29 @@ function _readSegmentBezier(prop, key1, key2) {
     // (e.g. Scale where only X changes while Y stays constant).
     var isMulti = (v1 instanceof Array);
     var dimCount = isMulti ? v1.length : 1;
+    var slotCount = _easeSlotCount(prop, key1);
+
+    // Multi-dim value with a single combined ease slot — mirrors the matching
+    // branch in _buildEaseArrayForSegment: time it off the vector distance.
+    if (isMulti && slotCount === 1) {
+        var mDist = _euclidDist(v1, v2);
+        if (mDist === 0) return null;
+        var mAvg = mDist / dt;
+        var mOut = prop.keyOutTemporalEase(key1)[0];
+        var mIn  = prop.keyInTemporalEase(key2)[0];
+        var mx1 = mOut.influence / 100;
+        var my1 = (mOut.speed * mx1) / mAvg;
+        var mx2 = 1 - (mIn.influence / 100);
+        var my2 = 1 - ((mIn.speed * (1 - mx2)) / mAvg);
+        return [Math.max(0, Math.min(1, mx1)), my1, Math.max(0, Math.min(1, mx2)), my2];
+    }
 
     var bestDim = 0;
     var bestAbsDv = -1;
-    for (var d = 0; d < dimCount; d++) {
+    // Never pick a dimension AE has no ease slot for — its speed would be read
+    // from the wrong slot and scaled by an unrelated axis' delta.
+    var searchDims = Math.min(dimCount, slotCount);
+    for (var d = 0; d < searchDims; d++) {
         var dv_d = isMulti ? (v2[d] - v1[d]) : (v2 - v1);
         if (Math.abs(dv_d) > bestAbsDv) {
             bestAbsDv = Math.abs(dv_d);
