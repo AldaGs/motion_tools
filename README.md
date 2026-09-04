@@ -323,6 +323,66 @@ a message through the Gumroad product page. I read every one.
 
 ---
 
+## 🔖 Versioning & releasing
+
+The version lives in **one place**: `ExtensionBundleVersion` in
+`CSXS/manifest.xml`. Never edit it by hand — `npm run release -- --version x.y.z`
+bumps it, and everything else (the tag, the `.zxp` filename, the release title)
+is derived from it. `package.json`'s version is unused and stays at `0.0.0`.
+
+### Which number to bump
+
+We follow semver, scoped to what a *user* notices — not to internal refactors.
+
+| Bump | When | Example |
+| --- | --- | --- |
+| **Patch** (`1.0.5` → `1.0.6`) | A bug fix. Nothing new, nothing moved. | Easing threw on Curves |
+| **Minor** (`1.0.6` → `1.1.0`) | A new feature or panel, or a meaningful capability added to an existing one. Existing configs keep working untouched. | Pin any profile, not just Helpers |
+| **Major** (`1.x` → `2.0.0`) | A user's saved config, macros, or palettes need migrating, or a panel's workflow changes shape. | Config schema rewrite |
+
+If a release mixes a fix and a feature, the feature wins — take the higher bump.
+
+### The release flow
+
+1. **Land the work on `main` first.** Commit with a conventional-commit
+   subject (`fix(ease): …`, `feat(pin): …`) and push. The release script
+   only commits the manifest bump; it will not carry your feature commit
+   along for you.
+2. **Test the change in After Effects.** The CEP install is a symlink to
+   this repo, so `jsx/hostscript.jsx` edits are live after reopening the
+   panel — no build needed for host-script-only fixes.
+3. **Cut the release:**
+
+   ```bash
+   npm run release -- --version 1.0.6 --notes "What changed, in plain language."
+   ```
+
+   That builds, signs the `.zxp`, commits `chore(release): v1.0.6`, pushes,
+   tags, and publishes the GitHub Release with both the versioned and
+   `-latest` assets. Add `--dry-run` first if you want to see the plan
+   without publishing.
+4. **Update the Gumroad changelog.** Product → Content → the Changelog
+   block, newest entry on top. Keep it user-facing: say what now works,
+   not which function was refactored. The GitHub Release already carries
+   the technical detail, so Gumroad does not need to repeat it.
+
+Gumroad's download links never change between releases — they point at
+`releases/latest/download/MTAGpanels-latest.zxp` — so shipping a version
+never means touching the product's file list.
+
+### Notes worth writing
+
+Release notes are read by someone deciding whether to re-download and
+reinstall. Lead with the answer to "does this fix my problem?":
+
+> Easing: effect parameters and custom-value properties now work.
+> Sliders, Point/Angle/Color Controls, and Curves can all be eased and
+> read back now.
+
+Not "refactored `_buildEaseArrayForSegment` to defer `keyValue()`".
+
+---
+
 ## 📄 License & credits
 
 Motion Toolbar itself is distributed under the license in `LICENSE`.
