@@ -143,6 +143,17 @@ export default function ColorPalette({ colors, setColors, name, setName, onLinkC
     onLinkChange(false);
   };
 
+  // Confirm only when the working colors differ from the saved copy (or were never saved).
+  const handleNew = () => {
+    const savedColors = isKnown ? loadPalette(name.trim())?.colors.map(norm) : undefined;
+    const dirty = colors.length > 0 && (!savedColors || savedColors.join() !== colors.join());
+    if (dirty) {
+      try { if (!window.confirm('Discard unsaved changes and start a new palette?')) return; }
+      catch { /* confirm unsupported — proceed */ }
+    }
+    setColors([]); setName(''); onLinkChange(false);
+  };
+
   const handleDelete = () => {
     const n = name.trim();
     if (!saved.includes(n)) { toast.info('Load a saved palette to delete it.'); return; }
@@ -172,6 +183,8 @@ export default function ColorPalette({ colors, setColors, name, setName, onLinkC
               <option key={n} value={n} style={{ backgroundColor: 'var(--panel-bg-elev)', color: 'var(--panel-fg)' }}>{n}</option>
             ))}
           </select>
+          <button className="mc-iconbtn" onClick={handleNew} title="New empty palette"
+            style={{ backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)' }}><FeatherIcon name="file-plus" size={15} /></button>
           <button className="mc-iconbtn" onClick={handleSave} title="Save palette to collection (asks for a name)"
             style={{ backgroundColor: 'var(--success)', color: '#fff', border: 'none' }}><FeatherIcon name="save" size={15} /></button>
           <button className="mc-iconbtn" onClick={handleDelete} disabled={!isKnown} title="Delete the loaded palette"
