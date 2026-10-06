@@ -683,31 +683,49 @@ function mtagSwitchAiExport(grouped, centerAnchor, parametric) {
                     var range = item.textRange;
                     if (range && range.length > 0) {
                         var chars = range.characters;
-                        var cur = null;
+                        var cur = null, curKey = null;
+                        var strPos = 0; // offset into contents (AI's characters can skip paragraph breaks)
+                        var solidOf = function (c, label) {
+                            try {
+                                if (!c || c.typename === "NoColor") return null;
+                                if (c.typename === "PatternColor") noteIfPattern(c, label);
+                                var pr = _mtagPaintFromAiColor(c, 1, conv);
+                                return (pr && pr.kind === "solid") ? pr.rgba : null;
+                            } catch (eC) { return null; }
+                        };
+                        var enumTail = function (v) { var s = String(v); return s.substring(s.lastIndexOf(".") + 1); };
                         for (var ci = 0; ci < chars.length; ci++) {
                             var ca = chars[ci].characterAttributes;
-                            var cf = "ArialMT";
-                            try { if (ca.textFont) cf = ca.textFont.name; } catch (e1) {}
-                            var cz = 12;
-                            try { if (ca.size) cz = ca.size * PT_TO_PX; } catch (e2) {}
-                            var crgba = null;
+                            var st = { font: "ArialMT", fontSize: 12, fillRgba: null, strokeRgba: null, strokeWidth: 0,
+                                       tracking: 0, leading: null, baselineShift: 0, hScale: 1, vScale: 1,
+                                       caps: "normal", baseline: "normal" };
+                            try { if (ca.textFont) st.font = ca.textFont.name; } catch (e1) {}
+                            try { if (ca.size) st.fontSize = ca.size * PT_TO_PX; } catch (e2) {}
+                            st.fillRgba = solidOf(ca.fillColor, "'" + (item.name || "text") + "' fill");
+                            st.strokeRgba = solidOf(ca.strokeColor, "'" + (item.name || "text") + "' stroke");
+                            try { if (st.strokeRgba) st.strokeWidth = (ca.strokeWeight || 1) * PT_TO_PX; } catch (e5) {}
+                            try { st.tracking = ca.tracking || 0; } catch (e6) {}
+                            try { if (!ca.autoLeading) st.leading = ca.leading * PT_TO_PX; } catch (e7) {}
+                            try { st.baselineShift = (ca.baselineShift || 0) * PT_TO_PX; } catch (e8) {}
+                            try { st.hScale = (ca.horizontalScale || 100) / 100; st.vScale = (ca.verticalScale || 100) / 100; } catch (e9) {}
                             try {
-                                if (ca.fillColor && ca.fillColor.typename !== "NoColor") {
-                                    if (ca.fillColor.typename === "PatternColor")
-                                        noteIfPattern(ca.fillColor, "'" + (item.name || "text") + "' fill");
-                                    var pr = _mtagPaintFromAiColor(ca.fillColor, 1, conv);
-                                    if (pr && pr.kind === "solid") crgba = pr.rgba;
-                                }
-                            } catch (e3) {}
+                                var cap = enumTail(ca.capitalization);
+                                st.caps = cap === "ALLCAPS" ? "all" : cap === "SMALLCAPS" ? "small" : cap === "ALLSMALLCAPS" ? "allSmall" : "normal";
+                            } catch (e10) {}
+                            try {
+                                var bp = enumTail(ca.baselinePosition);
+                                st.baseline = bp === "SUPERSCRIPT" ? "super" : bp === "SUBSCRIPT" ? "sub" : "normal";
+                            } catch (e11) {}
                             var chStr = "";
                             try { chStr = chars[ci].contents; } catch (e4) {}
-                            var same = cur && cur.font === cf && cur.fontSize === cz &&
-                                ((cur.fillRgba == null && crgba == null) ||
-                                 (cur.fillRgba && crgba && cur.fillRgba[0] === crgba[0] &&
-                                  cur.fillRgba[1] === crgba[1] && cur.fillRgba[2] === crgba[2] &&
-                                  cur.fillRgba[3] === crgba[3]));
-                            if (same) { cur.text += chStr; }
-                            else { cur = { text: chStr, font: cf, fontSize: cz, fillRgba: crgba }; runs.push(cur); }
+                            var at = contents ? String(contents).indexOf(chStr, strPos) : -1;
+                            if (at < 0) at = strPos;
+                            var key = st.toSource ? st.toSource() : JSON.stringify(st);
+                            if (cur && key === curKey && at === cur.start + cur.text.length) { cur.text += chStr; }
+                            else {
+                                cur = st; cur.text = chStr; cur.start = at; curKey = key; runs.push(cur);
+                            }
+                            strPos = at + chStr.length;
                         }
 
                         // Stroke (DOM exposes one) + paragraph justification.
@@ -740,7 +758,6 @@ function mtagSwitchAiExport(grouped, centerAnchor, parametric) {
                     fontSize = dom.fontSize;
                     if (dom.fillRgba) fills = [{ kind: "solid", rgba: dom.fillRgba }];
                 }
-                if (runs.length > 1) skipped.push("'" + (item.name || "text") + "' text has " + runs.length + " style runs");
 
                 // Name the AE text layer after its content (matches AI's own
                 // Layers-panel behaviour of showing the string). Collapse
@@ -757,7 +774,7 @@ function mtagSwitchAiExport(grouped, centerAnchor, parametric) {
                     justification: just,
                     textKind: textKind,
                     boxSize: (textKind === "area") ? [bbox.w, bbox.h] : null,
-                    runs: (runs.length > 1) ? runs : null,
+                    runs: runs.length ? runs : null, // always sent: carries caps/tracking/leading even for single-style
                     bbox: bbox,
                     aiAnchor: aiAnchor,
                     opacity: objOpacity,
@@ -1356,6 +1373,45 @@ function mtagSwitchPsExport(grouped, centerAnchor) {
 // ---------------- shared helpers (AE side) ----------------
 
 // Map the schema's blend-mode string to AE's BlendingMode enum for layers.
+// Applies a TextRun's style to a TextDocument or CharacterRange (same property
+// names on both). Each setter guarded: older AE lacks some (fontCapsOption etc).
+// `paint` = also set fill/stroke (whole-doc paint is handled by the caller).
+function _mtagApplyCharStyle(t, r, paint) {
+    function set(fn) { try { fn(); } catch (e) {} }
+    if (r.font) set(function () { t.font = r.font; });
+    if (r.fontSize) set(function () { t.fontSize = r.fontSize; });
+    if (r.tracking != null) set(function () { t.tracking = r.tracking; });
+    if (r.leading != null) set(function () { t.autoLeading = false; t.leading = r.leading; });
+    else set(function () { t.autoLeading = true; });
+    if (r.baselineShift != null) set(function () { t.baselineShift = r.baselineShift; });
+    // ponytail: assumes AE scale is a fraction (1 = 100%) like AI/100; flip to *100 if AE reads it as percent.
+    if (r.hScale != null) set(function () { t.horizontalScale = r.hScale; });
+    if (r.vScale != null) set(function () { t.verticalScale = r.vScale; });
+    if (r.caps) set(function () {
+        t.fontCapsOption = r.caps === "all" ? FontCapsOption.FONT_ALL_CAPS
+            : r.caps === "small" ? FontCapsOption.FONT_SMALL_CAPS
+            : r.caps === "allSmall" ? FontCapsOption.FONT_ALL_SMALL_CAPS
+            : FontCapsOption.FONT_NORMAL_CAPS;
+    });
+    if (r.baseline) set(function () {
+        t.fontBaselineOption = r.baseline === "super" ? FontBaselineOption.FONT_SUPERSCRIPT
+            : r.baseline === "sub" ? FontBaselineOption.FONT_SUBSCRIPT
+            : FontBaselineOption.FONT_NORMAL_BASELINE;
+    });
+    if (!paint) return;
+    set(function () {
+        if (r.fillRgba) { t.applyFill = true; t.fillColor = [r.fillRgba[0], r.fillRgba[1], r.fillRgba[2]]; }
+        else t.applyFill = false;
+    });
+    set(function () {
+        if (r.strokeRgba) {
+            t.applyStroke = true;
+            t.strokeColor = [r.strokeRgba[0], r.strokeRgba[1], r.strokeRgba[2]];
+            t.strokeWidth = r.strokeWidth || 1;
+        } else t.applyStroke = false;
+    });
+}
+
 function _mtagAeBlend(str) {
     switch (str) {
         case "multiply":   return BlendingMode.MULTIPLY;
@@ -1975,41 +2031,34 @@ function mtagSwitchAeImport(jsonString) {
                     textDoc.applyStroke = false;
                 }
                 
-                textProp.setValue(textDoc);
+                // Dominant run's extended attributes (caps/tracking/leading/...)
+                // layer-wide, so pre-24.3 AE without CharacterRange still gets them.
+                var runs = item.runs || [];
+                var domRun = null;
+                for (var dr = 0; dr < runs.length; dr++) if (!domRun || runs[dr].text.length > domRun.text.length) domRun = runs[dr];
+                if (domRun) _mtagApplyCharStyle(textDoc, domRun, false);
 
-                // Multi-style text: apply each run's font/size/fill to its
-                // character range. Requires AE's per-character CharacterRange API
-                // (newer AE); otherwise the dominant style above stands.
-                if (item.runs && item.runs.length > 1) {
+                // Per-character runs: CharacterRange lives on the TextDocument
+                // (AE 24.3+), NOT the Source Text property. Edits land on textDoc,
+                // committed by the single setValue below.
+                if (runs.length > 1) {
                     var perRunOk = false;
                     try {
-                        if (typeof textProp.characterRange === "function") {
-                            var total = 0;
-                            for (var rt = 0; rt < item.runs.length; rt++) total += item.runs[rt].text.length;
-                            if (total === String(item.text).length) {
-                                var off = 0;
-                                for (var rn = 0; rn < item.runs.length; rn++) {
-                                    var run = item.runs[rn];
-                                    var len = run.text.length;
-                                    if (len > 0) {
-                                        var cr = textProp.characterRange(off, off + len);
-                                        try { cr.font = run.font; } catch (eF) {}
-                                        try { cr.fontSize = run.fontSize; } catch (eZ) {}
-                                        try {
-                                            if (run.fillRgba) {
-                                                cr.applyFill = true;
-                                                cr.fillColor = [run.fillRgba[0], run.fillRgba[1], run.fillRgba[2]];
-                                            }
-                                        } catch (eCol) {}
-                                    }
-                                    off += len;
-                                }
-                                perRunOk = true;
+                        if (typeof textDoc.characterRange === "function") {
+                            var tlen = String(textDoc.text).length;
+                            for (var rn = 0; rn < runs.length; rn++) {
+                                var run = runs[rn];
+                                var rs = (run.start != null) ? run.start : 0;
+                                var re = Math.min(rs + run.text.length, tlen);
+                                if (re > rs) _mtagApplyCharStyle(textDoc.characterRange(rs, re), run, true);
                             }
+                            perRunOk = true;
                         }
                     } catch (eRange) { perRunOk = false; }
-                    if (!perRunOk) warnings.push("multi-style text '" + (item.name || "") + "' flattened to dominant style (per-character styling unavailable)");
+                    if (!perRunOk) warnings.push("multi-style text '" + (item.name || "") + "' flattened to dominant style (needs AE 24.3+)");
                 }
+
+                textProp.setValue(textDoc);
 
                 if (item.opacity != null && item.opacity < 1) {
                     textLayer.property("Transform").property("Opacity").setValue(item.opacity * 100);

@@ -143,6 +143,16 @@ export interface TextRun {
   font: string;
   fontSize: number;
   fillRgba?: [number, number, number, number] | null;
+  start?: number;                               // offset into TextItem.text
+  strokeRgba?: [number, number, number, number] | null;
+  strokeWidth?: number;
+  tracking?: number;                            // 1/1000 em (same unit both apps)
+  leading?: number | null;                      // px; null = auto
+  baselineShift?: number;
+  hScale?: number;                              // 1 = 100%
+  vScale?: number;
+  caps?: 'normal' | 'all' | 'small' | 'allSmall';
+  baseline?: 'normal' | 'super' | 'sub';
 }
 
 export interface TextItem {
