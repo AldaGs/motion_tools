@@ -157,7 +157,7 @@ export default function MtagSwitch() {
   // Modern native folder picker via CEP; ExtendScript's Folder.selectDialog
   // shows the legacy Windows tree dialog, so it's only a fallback.
   const pickFolder = async (start: string, title = 'Select image export folder'): Promise<{ path?: string; cancelled?: boolean }> => {
-    const fs = (window as any).cep?.fs;
+    const fs = window.cep?.fs;
     if (fs?.showOpenDialogEx) {
       const r = fs.showOpenDialogEx(false, true, title, start || '');
       if (r && r.err === 0 && r.data && r.data.length) return { path: String(r.data[0]).replace(/\\/g, '/') };

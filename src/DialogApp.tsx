@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { loadConfig, saveConfig, getDialogPayload, relativizePath } from './utils/storage';
 import type { AppData, Macro, MacroType, Profile, ProfileContext, EasingProfile } from './types';
 import IconPicker from './components/IconPicker';
@@ -41,12 +41,66 @@ const SETTINGS_SCOPE: SettingsScope = (() => {
   return 'all';
 })();
 
+const genProfileId = () => 'p_' + Date.now();
+const genEasingProfileId = () => 'ep_' + Date.now();
+const genMacroId = () => 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
+
+const initialDialogSetup = (() => {
+  if (SETTINGS_SCOPE !== 'all') {
+    return { mode: 'settings' as const, macro: null, editingMacroId: null, isEditing: false, newMacro: null, focus: null };
+  }
+  const data = getDialogPayload();
+  if (data?.mode === 'macro') {
+    if (data.macro) {
+      const orig: Macro = typeof structuredClone === 'function'
+        ? structuredClone(data.macro)
+        : JSON.parse(JSON.stringify(data.macro));
+      return {
+        mode: 'macro' as const,
+        macro: orig,
+        editingMacroId: data.macro.id as string,
+        isEditing: true,
+        newMacro: {
+          linkId: data.macro.linkId,
+          label: data.macro.label,
+          type: data.macro.type,
+          payload: data.macro.payload,
+          color: data.macro.color,
+          icon: data.macro.icon ?? '',
+          hotkey: data.macro.hotkey ?? '',
+          tags: data.macro.tags ?? [],
+          menuCommandName: data.macro.menuCommandName ?? '',
+        },
+        focus: null,
+      };
+    }
+    const newId = genMacroId();
+    return {
+      mode: 'macro' as const,
+      macro: null,
+      editingMacroId: newId,
+      isEditing: false,
+      newMacro: { label: '', type: 'menuCommand' as const, payload: '', color: '#3498db', icon: '', hotkey: '', tags: [], menuCommandName: '' },
+      focus: null,
+    };
+  }
+  return {
+    mode: 'settings' as const,
+    macro: null,
+    editingMacroId: null,
+    isEditing: false,
+    newMacro: null,
+    focus: data?.focus ?? null,
+  };
+})();
+
 export default function DialogApp() {
-  const [appData, setAppData] = useState<AppData | null>(null);
-  const [dialogMode, setDialogMode] = useState<'settings' | 'macro' | null>(null);
-  const [editingMacroId, setEditingMacroId] = useState<string | null>(null);
-  const originalMacro = useRef<Macro | null>(null);
-  const [newMacro, setNewMacro] = useState<Omit<Macro, 'id'>>({ label: '', type: 'menuCommand', payload: '', color: '#3498db', icon: '', hotkey: '', tags: [], menuCommandName: '' });
+  const [appData, setAppData] = useState<AppData | null>(() => loadConfig());
+  const dialogMode = initialDialogSetup.mode;
+  const editingMacroId = initialDialogSetup.editingMacroId;
+  const isEditing = initialDialogSetup.isEditing;
+  const originalMacro = useRef<Macro | null>(initialDialogSetup.macro);
+  const [newMacro, setNewMacro] = useState<Omit<Macro, 'id'>>(() => initialDialogSetup.newMacro ?? { label: '', type: 'menuCommand', payload: '', color: '#3498db', icon: '', hotkey: '', tags: [], menuCommandName: '' });
   const [commandSearch, setCommandSearch] = useState('');
   const [showCommandList, setShowCommandList] = useState(false);
   const commandListRef = useRef<HTMLDivElement>(null);
@@ -116,49 +170,10 @@ export default function DialogApp() {
   })();
 
   useEffect(() => {
-    // Initial load
-    setAppData(loadConfig());
-
-    // Dedicated settings panels (toolbar / easing) are settings-only: they're
-    // opened via requestOpenExtension without a payload, and must never fall
-    // into the Tool Editor even if a stale macro payload is lingering on disk.
-    if (SETTINGS_SCOPE !== 'all') {
-      setDialogMode('settings');
-      return;
-    }
-
-    const data = getDialogPayload();
-    if (data) {
-      if (data.mode === 'settings') {
-        setDialogMode('settings');
-        // Deep-link from the easing panel — scroll the easing-profiles
-        // section into view once the dialog has rendered.
-        if (data.focus === 'easingProfiles') {
-          setTimeout(() => easingProfilesSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
-        }
-      } else if (data.mode === 'macro') {
-        setDialogMode('macro');
-        if (data.macro) {
-          originalMacro.current = typeof structuredClone === 'function'
-            ? structuredClone(data.macro)
-            : JSON.parse(JSON.stringify(data.macro));
-          setEditingMacroId(data.macro.id);
-          setNewMacro({ linkId: data.macro.linkId, label: data.macro.label, type: data.macro.type, payload: data.macro.payload, color: data.macro.color, icon: data.macro.icon ?? '', hotkey: data.macro.hotkey ?? '', tags: data.macro.tags ?? [], menuCommandName: data.macro.menuCommandName ?? '' });
-        } else {
-          originalMacro.current = null;
-          const newId = 'm_' + Date.now();
-          setEditingMacroId(newId);
-          setNewMacro({ label: '', type: 'menuCommand', payload: '', color: '#3498db', icon: '', hotkey: '', tags: [], menuCommandName: '' });
-          // We don't save to disk immediately, we let the first edit trigger the live save
-        }
-      }
-    } else {
-      // No payload was written — likely the user opened the dialog panel
-      // directly from AE's Window menu instead of via the Settings button.
-      // Default to the settings UI so they aren't stranded on "Waiting for
-      // data…". The previous behaviour only fell back when CEP was absent,
-      // which left the in-AE case stuck.
-      setDialogMode('settings');
+    // Deep-link from the easing panel — scroll the easing-profiles
+    // section into view once the dialog has rendered.
+    if (initialDialogSetup.focus === 'easingProfiles') {
+      setTimeout(() => easingProfilesSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
     }
   }, []);
 
@@ -220,7 +235,7 @@ export default function DialogApp() {
   // Reverts the in-progress macro on disk: restores the snapshot taken at
   // dialog open, or removes the unsaved new macro entirely. Idempotent — runs
   // once even if invoked twice (e.g. Cancel button + beforeunload).
-  const rollbackMacro = () => {
+  const rollbackMacro = useCallback(() => {
     if (skipRollbackRef.current) return;
     skipRollbackRef.current = true;
 
@@ -267,7 +282,7 @@ export default function DialogApp() {
 
     const nextAppData = { ...data, profiles: nextProfiles };
     saveConfig(nextAppData); // synchronous final write — beforeunload-safe
-  };
+  }, []);
 
   const handleApplyMacro = () => {
     // Edits are already live on disk; flush the latest pending write before
@@ -297,7 +312,7 @@ export default function DialogApp() {
     const events: Array<keyof WindowEventMap> = ['beforeunload', 'unload', 'pagehide'];
     events.forEach((evt) => window.addEventListener(evt, handler));
     return () => events.forEach((evt) => window.removeEventListener(evt, handler));
-  }, []);
+  }, [rollbackMacro]);
 
   const handleBrowseScript = () => {
     if (typeof window.cep === 'undefined') return toast.error("Only works in AE.");
@@ -326,7 +341,7 @@ export default function DialogApp() {
   const handleAddProfile = () => {
     if (!appData) return;
     const newProfile: Profile = {
-      id: 'p_' + Date.now(),
+      id: genProfileId(),
       name: 'New Profile',
       autoTriggerContext: 'none',
       macros: [],
@@ -351,9 +366,9 @@ export default function DialogApp() {
     if (!src) return;
     const copy: Profile = {
       ...src,
-      id: 'p_' + Date.now(),
+      id: genProfileId(),
       name: src.name + ' Copy',
-      macros: src.macros.map((m) => ({ ...m, id: 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7) })),
+      macros: src.macros.map((m) => ({ ...m, id: genMacroId() })),
     };
     const idx = appData.profiles.findIndex((p) => p.id === id);
     const next = [...appData.profiles];
@@ -418,7 +433,7 @@ export default function DialogApp() {
   const handleAddEasingProfile = () => {
     if (!appData) return;
     const newProfile: EasingProfile = {
-      id: 'ep_' + Date.now(),
+      id: genEasingProfileId(),
       name: 'New Easing Profile',
       eases: [],
     };
@@ -434,7 +449,7 @@ export default function DialogApp() {
     if (!src) return;
     const copy: EasingProfile = {
       ...src,
-      id: 'ep_' + Date.now(),
+      id: genEasingProfileId(),
       name: src.name + ' Copy',
       eases: src.eases.map((e) => ({ ...e })),
     };
@@ -485,11 +500,11 @@ export default function DialogApp() {
         // a URL here, others a plain path.
         let userData = String(cs.getSystemPath(window.SystemPath.USER_DATA) || '');
         userData = userData.replace(/^file:\/{0,3}/i, '');
-        try { userData = decodeURIComponent(userData); } catch {}
+        try { userData = decodeURIComponent(userData); } catch { /* ignore */ }
         if (/^\/[A-Za-z]:\//.test(userData)) userData = userData.slice(1);
         return (userData + '/AGS-Extensions').replace(/\\/g, '/');
       }
-    } catch (e) { /* fall through */ }
+    } catch { /* fall through */ }
     return 'C:/';
   };
 
@@ -524,7 +539,7 @@ export default function DialogApp() {
   };
 
   // Opens the native CEP file picker and reads the chosen file synchronously.
-  const loadJsonViaDialog = (title: string): any | null => {
+  const loadJsonViaDialog = (title: string): Record<string, unknown> | null => {
     if (typeof window.cep === 'undefined') {
       toast.error("Import requires the CEP environment.");
       return null;
@@ -539,7 +554,7 @@ export default function DialogApp() {
         return null;
       }
       return JSON.parse(read.data);
-    } catch (err) {
+    } catch {
       toast.error("Failed to parse file.");
       return null;
     }
@@ -557,9 +572,9 @@ export default function DialogApp() {
 
   const handleImportMacros = () => {
     if (!appData) return;
-    const data = loadJsonViaDialog("Import Macros");
+    const data = loadJsonViaDialog("Import Macros") as { profiles?: Profile[]; activeProfileId?: string } | null;
     if (!data) return;
-    const profiles = data?.profiles;
+    const profiles = data.profiles;
     if (!Array.isArray(profiles)) {
       toast.error("Invalid macros file.");
       return;
@@ -582,7 +597,7 @@ export default function DialogApp() {
     const active = easingProfiles.find((p) => p.id === appData.settings.activeEasingProfileId)
       ?? easingProfiles[0];
     if (!active) return;
-    const safeName = active.name.replace(/[^\w\-]+/g, '-').toLowerCase() || 'easing';
+    const safeName = active.name.replace(/[^\w-]+/g, '-').toLowerCase() || 'easing';
     saveJsonViaDialog(`motion-toolbar-easing-${safeName}.json`, {
       kind: 'motion-toolbar/easing',
       version: 1,
@@ -630,7 +645,7 @@ export default function DialogApp() {
       saveConfig(next);
       const label = parsed.format === 'flow' ? 'Flow' : 'Motion Toolbar';
       toast.success(`Imported ${merged.length} ease${merged.length === 1 ? '' : 's'} from ${label}.`);
-    } catch (err) {
+    } catch {
       toast.error("Failed to import easing library.");
     }
   };
@@ -643,7 +658,7 @@ export default function DialogApp() {
       {/* Draggable Header — no custom close button: AE's titlebar X is the
           single close affordance. unload/beforeunload/pagehide handlers above
           turn that into a Cancel for macro mode automatically. */}
-      <div style={{ ['-webkit-app-region' as any]: 'drag', height: '30px', display: 'flex', alignItems: 'center', backgroundColor: 'var(--panel-bg-sunken)', borderBottom: '1px solid var(--panel-border)', padding: '0 10px', flexShrink: 0 }}>
+      <div style={{ ['-webkit-app-region' as unknown as keyof React.CSSProperties]: 'drag', height: '30px', display: 'flex', alignItems: 'center', backgroundColor: 'var(--panel-bg-sunken)', borderBottom: '1px solid var(--panel-border)', padding: '0 10px', flexShrink: 0 }}>
         <span style={{ fontSize: '11px', color: 'var(--panel-fg-dim)', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
           {dialogMode === 'macro'
             ? 'Tool Editor'
@@ -657,7 +672,7 @@ export default function DialogApp() {
 
         {dialogMode === 'macro' && (
           <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            <h4 style={{ margin: 0, fontSize: '14px', color: 'var(--panel-fg)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '8px' }}>{originalMacro.current ? 'Edit Tool' : 'Create New Tool'}</h4>
+            <h4 style={{ margin: 0, fontSize: '14px', color: 'var(--panel-fg)', borderBottom: '1px solid var(--panel-border)', paddingBottom: '8px' }}>{isEditing ? 'Edit Tool' : 'Create New Tool'}</h4>
             {newMacro.linkId && (
               <div style={{ fontSize: '11px', color: 'var(--panel-fg-muted)', background: 'var(--panel-bg-sunken)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)', padding: '6px 8px', display: 'flex', gap: '6px', alignItems: 'center' }}>
                 <span>🔗</span>
@@ -711,7 +726,7 @@ export default function DialogApp() {
                         marginTop: '4px', boxShadow: '0 8px 16px rgba(0,0,0,0.3)'
                       }} className="no-scrollbar">
                         {Object.entries(COMMAND_IDS)
-                          .filter(([_, name]) => name.toLowerCase().includes((commandSearch || '').toLowerCase()))
+                          .filter(([, name]) => name.toLowerCase().includes((commandSearch || '').toLowerCase()))
                           .slice(0, 50)
                           .map(([id, name]) => (
                             <div

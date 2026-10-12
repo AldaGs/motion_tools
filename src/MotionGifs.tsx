@@ -26,8 +26,14 @@ const tempFramesDir = (): string => {
 };
 
 export default function MotionGifs() {
-  const [bins, setBins] = useState<GifBinaries | null>(null);
-  const [settings, setSettings] = useState<GifSettings | null>(null);
+  const [bins, setBins] = useState<GifBinaries | null>(() => {
+    if (!isCEPEnvironment()) return null;
+    try { return resolveBinaries(); } catch (e) { console.error(e); return null; }
+  });
+  const [settings, setSettings] = useState<GifSettings | null>(() => {
+    if (!isCEPEnvironment()) return null;
+    return loadGifSettings();
+  });
 
   const [running, setRunning] = useState(false);
   const [percent, setPercent] = useState(0);
@@ -36,11 +42,12 @@ export default function MotionGifs() {
 
   useEffect(() => {
     if (!isCEPEnvironment()) return;
-    try { setBins(resolveBinaries()); } catch (e) { console.error(e); }
-    setSettings(loadGifSettings());
     // Re-read settings whenever the panel regains focus — the floating settings
     // panel live-saves to disk, so this picks up edits without any IPC.
-    const onFocus = () => setSettings(loadGifSettings());
+    const onFocus = () => {
+      setSettings(loadGifSettings());
+      try { setBins(resolveBinaries()); } catch (e) { console.error(e); }
+    };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
   }, []);
@@ -142,10 +149,13 @@ export default function MotionGifs() {
         encodeProgress,
       );
       afterExport(s, output);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
       if (isCancelled()) toast.info('Cancelled.');
-      else toast.error(e?.message ? `Export failed — ${e.message.split('\n')[0]}` : 'Export failed.');
+      else {
+        const msg = e instanceof Error ? e.message : String(e);
+        toast.error(msg ? `Export failed — ${msg.split('\n')[0]}` : 'Export failed.');
+      }
     } finally {
       end();
     }
@@ -162,14 +172,17 @@ export default function MotionGifs() {
     const os = window.require('os');
     const fs = window.require('fs');
 
-    let comps: Array<{ id: number; name: string }> = [];
+    let comps: Array<{ id: number; name: string }>;
     try {
       const parsed = JSON.parse(await evalScript('giphSelectedComps()'));
       if (!parsed.ok) throw new Error(parsed.error || 'Could not read selection.');
       comps = parsed.comps || [];
-    } catch (e: any) {
+    } catch (e: unknown) {
       if (isCancelled()) toast.info('Cancelled.');
-      else toast.error(e?.message ? `Batch failed — ${e.message}` : 'Batch failed.');
+      else {
+        const msg = e instanceof Error ? e.message : String(e);
+        toast.error(msg ? `Batch failed — ${msg}` : 'Batch failed.');
+      }
       return;
     }
     if (comps.length === 0) {
@@ -216,10 +229,13 @@ export default function MotionGifs() {
       setPercent(100);
       if (s.openFolder && lastOutput) revealFile(lastOutput);
       toast.info(`Batch export complete — ${total} file(s) saved`);
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
       if (isCancelled()) toast.info('Cancelled.');
-      else toast.error(e?.message ? `Batch failed — ${e.message.split('\n')[0]}` : 'Batch failed.');
+      else {
+        const msg = e instanceof Error ? e.message : String(e);
+        toast.error(msg ? `Batch failed — ${msg.split('\n')[0]}` : 'Batch failed.');
+      }
     } finally {
       end();
     }
@@ -275,10 +291,13 @@ export default function MotionGifs() {
         if (s.openFolder) revealFile(lastOutput);
         toast.info(`Batch convert complete — ${total} file(s) saved`);
       }
-    } catch (e: any) {
+    } catch (e: unknown) {
       console.error(e);
       if (isCancelled()) toast.info('Cancelled.');
-      else toast.error(e?.message ? `Convert failed — ${e.message.split('\n')[0]}` : 'Convert failed.');
+      else {
+        const msg = e instanceof Error ? e.message : String(e);
+        toast.error(msg ? `Convert failed — ${msg.split('\n')[0]}` : 'Convert failed.');
+      }
     } finally {
       end();
     }

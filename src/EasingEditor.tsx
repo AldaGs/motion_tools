@@ -34,7 +34,7 @@ const MiniCurve = ({ p1, p2, isActive, size = 36 }: { p1: BezierPoint, p2: Bezie
   // Stable per-instance id so the animateMotion's <mpath> reliably refers to
   // *this* curve and not a sibling — the previous inline `path=` attribute can
   // get cached/shared across instances in some renderers.
-  const pathId = useRef(`mt-mini-${++__miniCurveSeq}`).current;
+  const [pathId] = useState(() => `mt-mini-${++__miniCurveSeq}`);
   const cp1X = p1.x * size; const cp1Y = size - (p1.y * size);
   const cp2X = p2.x * size; const cp2Y = size - (p2.y * size);
   const pathD = `M 0,${size} C ${cp1X},${cp1Y} ${cp2X},${cp2Y} ${size},0`;
@@ -59,7 +59,7 @@ const MiniCurve = ({ p1, p2, isActive, size = 36 }: { p1: BezierPoint, p2: Bezie
 };
 
 export default function EasingEditor() {
-  const [appData, setAppData] = useState<AppData | null>(null);
+  const [appData, setAppData] = useState<AppData | null>(() => loadConfig());
   const [p1, setP1] = useState<BezierPoint>(DEFAULT_PRESETS[1].p1);
   const [p2, setP2] = useState<BezierPoint>(DEFAULT_PRESETS[1].p2);
 
@@ -135,18 +135,14 @@ export default function EasingEditor() {
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(300);
   const [containerHeight, setContainerHeight] = useState(400);
-  const [topHeight, setTopHeight] = useState(240);
+  const [topHeight, setTopHeight] = useState(() => loadConfig()?.settings?.easingTopHeight ?? 240);
   const topHeightRef = useRef(240);
   const draggingRef = useRef(false);
-  const hydratedTopHeightRef = useRef(false);
   const dragStartY = useRef(0);
   const dragStartHeight = useRef(0);
   useEffect(() => { topHeightRef.current = topHeight; }, [topHeight]);
 
   useEffect(() => {
-    // Initial load
-    setAppData(loadConfig());
-
     return subscribeConfigChanges(() => setAppData(loadConfig()));
   }, []);
 
@@ -162,18 +158,6 @@ export default function EasingEditor() {
     return () => observer.disconnect();
   }, []);
 
-  // Hydrate topHeight from saved settings the first time appData arrives. Skip
-  // updates while the user is mid-drag so a concurrent file-watcher reload
-  // doesn't snap the resizer back.
-  useEffect(() => {
-    if (draggingRef.current) return;
-    if (hydratedTopHeightRef.current) return;
-    if (appData?.settings?.easingTopHeight !== undefined) {
-      setTopHeight(appData.settings.easingTopHeight);
-      hydratedTopHeightRef.current = true;
-    }
-  }, [appData?.settings?.easingTopHeight]);
-
   const isCompact = containerWidth < 180;
 
   const toSVG = (val: number, isY = false) => {
@@ -182,8 +166,8 @@ export default function EasingEditor() {
   };
 
   const fromSVG = (pixelX: number, pixelY: number) => {
-    let x = Math.max(0, Math.min(1, (pixelX - PADDING) / INNER_SIZE));
-    let y = (INNER_SIZE - (pixelY - PADDING)) / INNER_SIZE;
+    const x = Math.max(0, Math.min(1, (pixelX - PADDING) / INNER_SIZE));
+    const y = (INNER_SIZE - (pixelY - PADDING)) / INNER_SIZE;
     return { x, y };
   };
 
@@ -198,7 +182,7 @@ export default function EasingEditor() {
     const rect = svgRef.current.getBoundingClientRect();
     const pixelX = (e.clientX - rect.left) * (SVG_SIZE / rect.width);
     const pixelY = (e.clientY - rect.top) * (SVG_SIZE / rect.height);
-    let newVal = fromSVG(pixelX, pixelY);
+    const newVal = fromSVG(pixelX, pixelY);
     // Shift-snap to 0.05 grid
     if (e.shiftKey) {
       newVal.x = Math.round(newVal.x * 20) / 20;
@@ -453,15 +437,9 @@ export default function EasingEditor() {
 
   // Source filter: 'all' | one of the kinds. Counts power the chip labels.
   type Filter = 'all' | 'builtin' | 'user' | 'flow' | 'mt';
-  const [sourceFilter, setSourceFilterRaw] = useState<Filter>('all');
-  // Hydrate from settings once.
-  const sourceFilterHydrated = useRef(false);
-  useEffect(() => {
-    if (sourceFilterHydrated.current) return;
-    const persisted = appData?.settings.easingSourceFilter;
-    if (persisted) setSourceFilterRaw(persisted);
-    if (appData) sourceFilterHydrated.current = true;
-  }, [appData]);
+  const [sourceFilter, setSourceFilterRaw] = useState<Filter>(() => {
+    return (loadConfig()?.settings.easingSourceFilter as Filter) || 'all';
+  });
   // Persist on change. Skips the hydration tick.
   const setSourceFilter = (next: Filter) => {
     setSourceFilterRaw(next);
@@ -512,7 +490,7 @@ export default function EasingEditor() {
   const handleResizerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     const target = e.currentTarget;
-    try { target.setPointerCapture(e.pointerId); } catch { }
+    try { target.setPointerCapture(e.pointerId); } catch { /* ignore */ }
     draggingRef.current = true;
     dragStartY.current = e.clientY;
     dragStartHeight.current = topHeight;
@@ -529,7 +507,7 @@ export default function EasingEditor() {
       setTopHeight(next);
     };
     const handleUp = (ev: PointerEvent) => {
-      try { target.releasePointerCapture(ev.pointerId); } catch { }
+      try { target.releasePointerCapture(ev.pointerId); } catch { /* ignore */ }
       target.removeEventListener('pointermove', handleMove);
       target.removeEventListener('pointerup', handleUp);
       target.removeEventListener('pointercancel', handleUp);
@@ -730,31 +708,60 @@ export default function EasingEditor() {
                       animation: 'mt-fade-in 100ms ease-out both',
                     }}
                   >
-                    {[
-                      { icon: <Download size={13} />, label: 'Read from selection',    onClick: handleReadEase },
-                      { icon: <Save size={13} />,     label: 'Save to library…',       onClick: handleSaveEase },
-                      { icon: <FileUp size={13} />,   label: 'Import library (Flow / MT)…', onClick: handleImportEasing },
-                    ].map((it) => (
-                      <button
-                        key={it.label}
-                        onClick={() => { setUtilOpen(false); it.onClick(); }}
-                        role="menuitem"
-                        style={{
-                          background: 'none', border: 'none',
-                          color: 'var(--panel-fg)',
-                          textAlign: 'left',
-                          padding: '6px 8px', fontSize: 11,
-                          borderRadius: 'var(--radius-sm)',
-                          cursor: 'pointer',
-                          display: 'flex', alignItems: 'center', gap: 8,
-                        }}
-                        onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--panel-bg-sunken)'}
-                        onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
-                      >
-                        <span style={{ display: 'flex', width: 14, color: 'var(--panel-fg-muted)' }}>{it.icon}</span>
-                        {it.label}
-                      </button>
-                    ))}
+                    <button
+                      onClick={() => { setUtilOpen(false); handleReadEase(); }}
+                      role="menuitem"
+                      style={{
+                        background: 'none', border: 'none',
+                        color: 'var(--panel-fg)',
+                        textAlign: 'left',
+                        padding: '6px 8px', fontSize: 11,
+                        borderRadius: 'var(--radius-sm)',
+                        cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', gap: 8,
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--panel-bg-sunken)'}
+                      onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                    >
+                      <span style={{ display: 'flex', width: 14, color: 'var(--panel-fg-muted)' }}><Download size={13} /></span>
+                      Read from selection
+                    </button>
+                    <button
+                      onClick={() => { setUtilOpen(false); handleSaveEase(); }}
+                      role="menuitem"
+                      style={{
+                        background: 'none', border: 'none',
+                        color: 'var(--panel-fg)',
+                        textAlign: 'left',
+                        padding: '6px 8px', fontSize: 11,
+                        borderRadius: 'var(--radius-sm)',
+                        cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', gap: 8,
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--panel-bg-sunken)'}
+                      onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                    >
+                      <span style={{ display: 'flex', width: 14, color: 'var(--panel-fg-muted)' }}><Save size={13} /></span>
+                      Save to library…
+                    </button>
+                    <button
+                      onClick={() => { setUtilOpen(false); handleImportEasing(); }}
+                      role="menuitem"
+                      style={{
+                        background: 'none', border: 'none',
+                        color: 'var(--panel-fg)',
+                        textAlign: 'left',
+                        padding: '6px 8px', fontSize: 11,
+                        borderRadius: 'var(--radius-sm)',
+                        cursor: 'pointer',
+                        display: 'flex', alignItems: 'center', gap: 8,
+                      }}
+                      onMouseEnter={(e) => e.currentTarget.style.backgroundColor = 'var(--panel-bg-sunken)'}
+                      onMouseLeave={(e) => e.currentTarget.style.backgroundColor = 'transparent'}
+                    >
+                      <span style={{ display: 'flex', width: 14, color: 'var(--panel-fg-muted)' }}><FileUp size={13} /></span>
+                      Import library (Flow / MT)…
+                    </button>
                   </div>
                 )}
               </div>

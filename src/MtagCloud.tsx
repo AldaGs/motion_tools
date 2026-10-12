@@ -75,8 +75,8 @@ export default function MtagCloud() {
       const stored = await authSignIn();
       setAuth({ status: 'signed-in', account: stored.account });
       await syncEverything();
-    } catch (e: any) {
-      setAuth({ status: 'error', message: e?.message ?? String(e) });
+    } catch (e: unknown) {
+      setAuth({ status: 'error', message: e instanceof Error ? e.message : String(e) });
     }
   };
 

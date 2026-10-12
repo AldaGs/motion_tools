@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { applyColorToSelection, extractColorsFromSelection } from './utils/aeColor';
 import {
   listPalettes, loadPalette, savePalette, deletePalette,
@@ -11,6 +11,45 @@ import { pickScreenColor, EYEDROPPER_AVAILABLE } from './utils/eyedropper';
 import { toast } from './utils/toast';
 
 const norm = (hex: string) => '#' + hex.replace(/^#/, '').toUpperCase();
+
+const SwatchContextMenu = ({
+  menu,
+  history,
+  colors,
+  onClose,
+  onApply,
+  onAdd,
+  onRemoveHistory,
+  onEditColor,
+  onRemoveColor,
+}: {
+  menu: { x: number; y: number; index: number };
+  history: string[];
+  colors: string[];
+  onClose: () => void;
+  onApply: (hex: string, mode: 'fill' | 'stroke') => void;
+  onAdd: (hex: string) => void;
+  onRemoveHistory: (hex: string) => void;
+  onEditColor: (index: number) => void;
+  onRemoveColor: (index: number) => void;
+}) => {
+  const isHistory = menu.index < 0;
+  const hex = isHistory ? history[-1 - menu.index] : colors[menu.index];
+  if (!hex) return null;
+  const items: ContextMenuItem[] = [
+    { id: 'fill', icon: '▣', label: 'Apply as fill', onSelect: () => onApply(hex, 'fill') },
+    { id: 'stroke', icon: '◻', label: 'Apply as stroke', onSelect: () => onApply(hex, 'stroke') },
+    ...copyFormatItems(hex, true),
+  ];
+  if (isHistory) {
+    items.push({ id: 'add', icon: '＋', label: 'Add to palette', divider: true, onSelect: () => onAdd(hex) });
+    items.push({ id: 'remove', icon: '×', label: 'Remove from history', onSelect: () => onRemoveHistory(hex) });
+  } else {
+    items.push({ id: 'edit', icon: '✎', label: 'Edit color…', divider: true, onSelect: () => onEditColor(menu.index) });
+    items.push({ id: 'remove', icon: '×', label: 'Remove', onSelect: () => onRemoveColor(menu.index) });
+  }
+  return <ContextMenu x={menu.x} y={menu.y} items={items} onClose={onClose} />;
+};
 
 interface Props {
   colors: string[];
@@ -161,7 +200,7 @@ export default function ColorPalette({ colors, setColors, name, setName, onLinkC
     else toast.error('Could not delete palette.');
   };
 
-  const isKnown = useMemo(() => saved.includes(name.trim()), [saved, name]);
+  const isKnown = saved.includes(name.trim());
 
   const inp: React.CSSProperties = { flex: 1, minWidth: 0, padding: '4px 6px', fontSize: '12px', backgroundColor: 'var(--panel-bg-sunken)', color: 'var(--panel-fg)', border: '1px solid var(--panel-border)', borderRadius: 'var(--radius-sm)' };
 
@@ -277,26 +316,19 @@ export default function ColorPalette({ colors, setColors, name, setName, onLinkC
         onChange={(e) => { if (editIndexRef.current >= 0) setColorAt(editIndexRef.current, e.target.value); }}
         style={{ position: 'fixed', width: 0, height: 0, opacity: 0, pointerEvents: 'none', left: -9999 }} />
 
-      {menu && (() => {
-        // Negative indices (-1 - i) address history swatches, non-negative ones
-        // the working palette.
-        const isHistory = menu.index < 0;
-        const hex = isHistory ? history[-1 - menu.index] : colors[menu.index];
-        if (!hex) return null;
-        const items: ContextMenuItem[] = [
-          { id: 'fill', icon: '▣', label: 'Apply as fill', onSelect: () => { applyColorToSelection(hex, 'fill'); recordHistory([hex]); } },
-          { id: 'stroke', icon: '◻', label: 'Apply as stroke', onSelect: () => { applyColorToSelection(hex, 'stroke'); recordHistory([hex]); } },
-          ...copyFormatItems(hex, true),
-        ];
-        if (isHistory) {
-          items.push({ id: 'add', icon: '＋', label: 'Add to palette', divider: true, onSelect: () => addColor(hex) });
-          items.push({ id: 'remove', icon: '×', label: 'Remove from history', onSelect: () => setHistory((prev) => removeFromColorHistory(hex, prev)) });
-        } else {
-          items.push({ id: 'edit', icon: '✎', label: 'Edit color…', divider: true, onSelect: () => editColor(menu.index) });
-          items.push({ id: 'remove', icon: '×', label: 'Remove', onSelect: () => removeColor(menu.index) });
-        }
-        return <ContextMenu x={menu.x} y={menu.y} items={items} onClose={() => setMenu(null)} />;
-      })()}
+      {menu && (
+        <SwatchContextMenu
+          menu={menu}
+          history={history}
+          colors={colors}
+          onClose={() => setMenu(null)}
+          onApply={(hex, mode) => { applyColorToSelection(hex, mode); recordHistory([hex]); }}
+          onAdd={addColor}
+          onRemoveHistory={(hex) => setHistory((prev) => removeFromColorHistory(hex, prev))}
+          onEditColor={editColor}
+          onRemoveColor={removeColor}
+        />
+      )}
     </div>
   );
 }
