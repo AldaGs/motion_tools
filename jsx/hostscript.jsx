@@ -1333,6 +1333,17 @@ function _giphIncrementName(filePath, ext) {
 }
 
 
+// Downscale in AE's output module so ffmpeg/gifski get small frames instead of
+// resizing full-res ones. Only shrinks; failures fall back to encoder scaling.
+function _giphApplyResize(module, comp, width) {
+    var w = parseInt(width);
+    if (isNaN(w) || w <= 0 || w >= comp.width) return;
+    var h = Math.round(comp.height * w / comp.width);
+    try {
+        module.setSettings({ "Resize": true, "Resize to": { x: w, y: h }, "Resize Quality": "High" });
+    } catch (e) {}
+}
+
 // Public entry point. optsJSON: { templateIndex, outputFolder, templateFile }
 // Returns JSON: { ok, mode:'png'|'prores', base, folder, name, width, height,
 //                 frameRate } or { ok:false, error }.
@@ -1375,6 +1386,7 @@ function giphRenderComp(optsJSON) {
             if (!ok) return JSON.stringify({ ok: false, error: "Could not install template: " + templateName });
         }
         module.applyTemplate(templateName);
+        _giphApplyResize(module, comp, opts.width);
         queue.render();
 
         var base = outFile.fsName.slice(0, -ext.length); // path without extension
@@ -1389,6 +1401,65 @@ function giphRenderComp(optsJSON) {
             frameRate: comp.frameRate,
             duration: comp.duration
         });
+    } catch (err) {
+        return JSON.stringify({ ok: false, error: err.toString() });
+    }
+}
+
+// Batch: queue every comp, then ONE queue.render() so AE renders them back to
+// back without round-tripping to the panel between comps.
+// optsJSON: { templateIndex, templateFile, jobs:[{ compId, renderFolder }] }
+// Returns JSON: { ok, results:[same shape as giphRenderComp] } or { ok:false, error }.
+function giphRenderComps(optsJSON) {
+    try {
+        var opts = JSON.parse(optsJSON);
+        var idx = parseInt(opts.templateIndex);
+        if (isNaN(idx) || idx < 0 || idx >= GIPH_TEMPLATES.length) idx = 0;
+        var templateName = GIPH_TEMPLATES[idx][0];
+        var mode = (templateName.indexOf("PNG") != -1) ? "png" : "prores";
+        var ext = (mode === "png") ? ".png" : ".mov";
+
+        var queue = _giphRenderQueue();
+        if (!queue) return JSON.stringify({ ok: false, error: "Render queue unavailable." });
+        _giphClearRenderQueue(queue);
+
+        var results = [];
+        var used = {}; // same-named comps in one batch would collide before any file exists
+        for (var j = 0; j < opts.jobs.length; j++) {
+            var comp = _giphCompById(opts.jobs[j].compId);
+            if (!comp) return JSON.stringify({ ok: false, error: "Comp not found (id " + opts.jobs[j].compId + ")." });
+
+            var renderFolder = Folder(opts.jobs[j].renderFolder);
+            if (!renderFolder.exists) renderFolder.create();
+            if (!renderFolder.exists) return JSON.stringify({ ok: false, error: "Could not create render folder." });
+
+            var baseName = String(comp.name).replace(/\s/g, "");
+            var outFile = File(renderFolder.fsName + "\\" + baseName + ext);
+            outFile = File(renderFolder.fsName + "\\" + _giphIncrementName(outFile.fsName, ext));
+            var key = outFile.fsName.toLowerCase();
+            if (used[key]) outFile = File(renderFolder.fsName + "\\" + baseName + "-b" + j + ext);
+            used[outFile.fsName.toLowerCase()] = true;
+
+            var module = queue.items.add(comp).outputModule(1);
+            module.file = outFile;
+            if (!_giphIsTemplate(module, templateName)) {
+                if (!_giphEnsureTemplate(opts.templateFile, templateName, GIPH_TEMPLATES[idx][1])) {
+                    return JSON.stringify({ ok: false, error: "Could not install template: " + templateName });
+                }
+            }
+            module.applyTemplate(templateName);
+            _giphApplyResize(module, comp, opts.jobs[j].width);
+
+            results.push({
+                ok: true, mode: mode,
+                base: outFile.fsName.slice(0, -ext.length),
+                folder: renderFolder.fsName, name: baseName,
+                width: comp.width, height: comp.height,
+                frameRate: comp.frameRate, duration: comp.duration
+            });
+        }
+        queue.render();
+        return JSON.stringify({ ok: true, results: results });
     } catch (err) {
         return JSON.stringify({ ok: false, error: err.toString() });
     }

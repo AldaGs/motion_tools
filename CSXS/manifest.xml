@@ -170,7 +170,7 @@
         <UI>
           <Type>Modeless</Type>
           <Geometry>
-            <Size><Height>640</Height><Width>340</Width></Size>
+            <Size><Height>820</Height><Width>340</Width></Size>
             <MinSize><Height>360</Height><Width>280</Width></MinSize>
           </Geometry>
         </UI>

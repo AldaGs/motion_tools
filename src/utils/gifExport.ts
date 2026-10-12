@@ -312,7 +312,7 @@ export const renderInBackground = (
       '-OMtemplate', prep.templateName,
       '-output', output,
     ];
-    const proc = spawn(aerender, args);
+    const proc = track(spawn(aerender, args));
     const scan = (buf: any) => {
       const text = String(buf);
       tail = (tail + text).slice(-4000);
@@ -333,6 +333,28 @@ export const renderInBackground = (
 };
 
 // --- shared spawn helpers ---------------------------------------------------
+
+// Stop button: every long-running child goes through track(), so cancelExport()
+// can kill whatever is live. Anything spawned after a cancel dies on arrival, so
+// multi-step pipelines (extract ? encode, batch loops) unwind via their rejects.
+const liveProcs = new Set<any>();
+let cancelled = false;
+const killTree = (proc: any) => {
+  try {
+    // aerender spawns its own AE child; kill the whole tree on Windows.
+    if (platformDir() === 'win') window.require('child_process').spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F']);
+    else proc.kill();
+  } catch { /* already gone */ }
+};
+const track = (proc: any) => {
+  if (cancelled) { killTree(proc); return proc; }
+  liveProcs.add(proc);
+  proc.on('close', () => liveProcs.delete(proc));
+  return proc;
+};
+export const resetCancel = () => { cancelled = false; };
+export const isCancelled = () => cancelled;
+export const cancelExport = () => { cancelled = true; liveProcs.forEach(killTree); };
 
 const TIME_RE = /(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/;
 const toSeconds = (hms: string): number => {
@@ -355,7 +377,7 @@ const ffmpegExtract = (
   return new Promise((resolve, reject) => {
     let duration = 0;
     let tail = '';
-    const proc = spawn(ffmpeg, ['-y', '-i', input, '-vf', `scale=${width}:-1,fps=${fps}`, framePattern]);
+    const proc = track(spawn(ffmpeg, ['-y', '-i', input, '-vf', `scale=${width}:-1,fps=${fps}`, framePattern]));
     proc.stderr.on('data', (buf: any) => {
       const text = String(buf);
       tail = (tail + text).slice(-2000);
@@ -385,17 +407,19 @@ const gifskiEncode = (
   onProgress: (p: GifProgress) => void,
 ): Promise<void> => {
   const { spawn } = window.require('child_process');
+  const path = window.require('path');
   return new Promise((resolve, reject) => {
     if (frames.length === 0) return reject(new Error('No frames were rendered.'));
     let tail = '';
     const args = [
       '-r', String(opts.fps),
-      '-W', String(opts.width),
       '-Q', String(opts.quality),
       '--repeat', String(opts.loop ?? 0),
       '-o', opts.output,
-    ].concat(frames);
-    const proc = spawn(gifski, args);
+    // Bare names + cwd: absolute paths for hundreds of frames blow past
+    // Windows' ~32K command-line limit (spawn ENAMETOOLONG).
+    ].concat(frames.map((f) => path.basename(f)));
+    const proc = track(spawn(gifski, args, { cwd: path.dirname(frames[0]) }));
     proc.stderr.on('data', (buf: any) => {
       const text = String(buf);
       tail = (tail + text).slice(-2000);
@@ -407,6 +431,46 @@ const gifskiEncode = (
     });
     proc.on('error', reject);
     proc.on('close', (code: number) => (code === 0 ? resolve() : reject(new Error(`gifski exited ${code}\n${tail}`))));
+  });
+};
+
+// ffmpeg: rescale a PNG sequence to `width` (gifski never resizes — frames
+// arrive at final size from AE's output module or from here). Frames are
+// written as scaled_00000.png… beside the originals.
+const ffmpegScaleFrames = (
+  ffmpeg: string,
+  frames: string[],
+  width: number,
+  weight: number,
+  onProgress: (p: GifProgress) => void,
+): Promise<string[]> => {
+  const { spawn } = window.require('child_process');
+  const fs = window.require('fs');
+  const path = window.require('path');
+  return new Promise((resolve, reject) => {
+    if (frames.length === 0) return reject(new Error('No frames were rendered.'));
+    const folder = path.dirname(frames[0]);
+    const esc = (f: string) => f.replace(/\\/g, '/').replace(/'/g, "'\\''");
+    const listPath = path.join(folder, 'ffscale.txt');
+    try { fs.writeFileSync(listPath, 'ffconcat version 1.0\n' + frames.map((f) => `file '${esc(f)}'\n`).join(''), 'utf8'); }
+    catch (e) { return reject(e as Error); }
+    let tail = '';
+    const proc = track(spawn(ffmpeg, ['-y', '-f', 'concat', '-safe', '0', '-i', listPath,
+      '-vf', `scale=${width}:-1:flags=lanczos`, '-vsync', '0', path.join(folder, 'scaled_%05d.png')]));
+    proc.stderr.on('data', (buf: any) => {
+      const text = String(buf);
+      tail = (tail + text).slice(-2000);
+      const m = text.match(/frame=\s*(\d+)/);
+      if (m) {
+        const done = Math.min(1, +m[1] / frames.length);
+        onProgress({ phase: 'extract', percent: Math.round(done * weight * 100), message: `Resizing frames… ${Math.round(done * 100)}%` });
+      }
+    });
+    proc.on('error', reject);
+    proc.on('close', (code: number) => {
+      try { fs.unlinkSync(listPath); } catch { /* ignore */ }
+      code === 0 ? resolve(collectSequence(folder, 'scaled')) : reject(new Error(`ffmpeg exited ${code}\n${tail}`));
+    });
   });
 };
 
@@ -458,7 +522,7 @@ const ffmpegEncodeFrames = (
     }
 
     const args = ['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-vf', vf, '-r', String(opts.fps), ...codec, opts.output];
-    const proc = spawn(ffmpeg, args);
+    const proc = track(spawn(ffmpeg, args));
     let tail = '';
     proc.stderr.on('data', (buf: any) => {
       const text = String(buf);
@@ -550,8 +614,16 @@ export const encodeRenderToGif = (
     // AE already produced the frames; gifski owns the entire bar.
     const prefix = path.basename(render.base);
     const frames = collectSequence(render.folder, prefix);
-    onProgress({ phase: 'encode', percent: 0, message: 'Encoding…' });
-    return encodeFrames(bins, frames, opts, 0, 1, onProgress).then(finish).catch(fail);
+    // AE usually resized already; if not (aerender, upscale, resize refused), ffmpeg does it.
+    return probeVideo(frames[0] || '').then((meta) => {
+      if (!meta.width || meta.width === opts.width) {
+        onProgress({ phase: 'encode', percent: 0, message: 'Encoding…' });
+        return encodeFrames(bins, frames, opts, 0, 1, onProgress);
+      }
+      onProgress({ phase: 'extract', percent: 0, message: 'Resizing frames…' });
+      return ffmpegScaleFrames(bins.ffmpeg, frames, opts.width, EXTRACT_WEIGHT, onProgress)
+        .then((scaled) => encodeFrames(bins, scaled, opts, EXTRACT_WEIGHT, 1 - EXTRACT_WEIGHT, onProgress));
+    }).then(finish).catch(fail);
   }
 
   // ProRes: extract frames with ffmpeg, then encode.

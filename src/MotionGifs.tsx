@@ -12,7 +12,7 @@ import { loadGifSettings, type GifSettings } from './utils/storage';
 import {
   resolveBinaries, encodeRenderToGif, convertVideoToGif, probeVideo,
   renderInBackground, revealFile, playFile, openFolder, templateFilePath, outputExtForFormat,
-  versionedOutputPath,
+  versionedOutputPath, resetCancel, cancelExport, isCancelled,
   type GifBinaries, type RenderResult, type BackgroundRenderPrep,
 } from './utils/gifExport';
 import { toast } from './utils/toast';
@@ -68,6 +68,7 @@ export default function MotionGifs() {
   };
 
   const begin = (msg: string) => {
+    resetCancel();
     runningRef.current = true;
     setRunning(true);
     setPercent(0);
@@ -104,7 +105,7 @@ export default function MotionGifs() {
 
     begin(s.renderInBackground ? 'Preparing background render…' : 'Rendering comp…');
     try {
-      const req = JSON.stringify({ templateIndex: s.templateIndex, renderFolder, templateFile: templateFilePath() });
+      const req = JSON.stringify({ templateIndex: s.templateIndex, renderFolder, templateFile: templateFilePath(), width: s.sizeMode === 'comp' ? 0 : s.width });
       let render: RenderResult;
       let encodeBase = 0; // % the encode phase starts at
 
@@ -143,14 +144,15 @@ export default function MotionGifs() {
       afterExport(s, output);
     } catch (e: any) {
       console.error(e);
-      toast.error(e?.message ? `Export failed — ${e.message.split('\n')[0]}` : 'Export failed.');
+      if (isCancelled()) toast.info('Cancelled.');
+      else toast.error(e?.message ? `Export failed — ${e.message.split('\n')[0]}` : 'Export failed.');
     } finally {
       end();
     }
   };
 
-  // Batch: render + encode every comp selected in the Project panel, one after
-  // another, into the output folder. Always uses the blocking render path (the
+  // Batch: queue every comp selected in the Project panel, render them all in
+  // one AE pass, then encode each into the output folder. Always uses the blocking render path (the
   // background/aerender flow is single-comp only). One shared progress bar is
   // split evenly across the comps.
   const handleBatchExport = async () => {
@@ -166,7 +168,8 @@ export default function MotionGifs() {
       if (!parsed.ok) throw new Error(parsed.error || 'Could not read selection.');
       comps = parsed.comps || [];
     } catch (e: any) {
-      toast.error(e?.message ? `Batch failed — ${e.message}` : 'Batch failed.');
+      if (isCancelled()) toast.info('Cancelled.');
+      else toast.error(e?.message ? `Batch failed — ${e.message}` : 'Batch failed.');
       return;
     }
     if (comps.length === 0) {
@@ -179,21 +182,25 @@ export default function MotionGifs() {
     begin(`Batch export — 0/${total}…`);
     let lastOutput = '';
     try {
-      for (let i = 0; i < total; i++) {
-        const c = comps[i];
+      // Queue every comp and render them in one AE pass, then encode each.
+      const stamp = Date.now();
+      const jobs = comps.map((c, i) => {
         const renderFolder = s.keepFrames
           ? path.join(s.outputDir, 'GIPHERrender')
-          : path.join(os.tmpdir(), 'MotionGifs', `${Date.now()}_${i}`);
+          : path.join(os.tmpdir(), 'MotionGifs', `${stamp}_${i}`);
         try { fs.mkdirSync(renderFolder, { recursive: true }); } catch { /* host will retry */ }
+        return { compId: c.id, renderFolder, width: s.sizeMode === 'comp' ? 0 : s.width };
+      });
+      setStatus(`Rendering ${total} comp(s) in the render queue…`);
+      const req = JSON.stringify({ templateIndex: s.templateIndex, templateFile: templateFilePath(), jobs });
+      const raw = await evalScript(`giphRenderComps(${JSON.stringify(req)})`);
+      let batch: { ok: boolean; error?: string; results: RenderResult[] };
+      try { batch = JSON.parse(raw); }
+      catch { throw new Error(`Host render failed: ${raw}`); }
+      if (!batch.ok) throw new Error(batch.error || 'Batch render failed.');
 
-        const req = JSON.stringify({ templateIndex: s.templateIndex, renderFolder, templateFile: templateFilePath(), compId: c.id });
-        setStatus(`(${i + 1}/${total}) Rendering ${c.name}…`);
-        let render: RenderResult;
-        const raw = await evalScript(`giphRenderComp(${JSON.stringify(req)})`);
-        try { render = JSON.parse(raw); }
-        catch { throw new Error(`Host render failed: ${raw}`); }
-        if (!render.ok) throw new Error(render.error || `Render failed for ${c.name}.`);
-
+      for (let i = 0; i < total; i++) {
+        const render = batch.results[i];
         const width = s.sizeMode === 'comp' ? render.width : s.width;
         const fps = s.fpsMode === 'comp' ? Math.round(render.frameRate) : s.fps;
         lastOutput = versionedOutputPath(s.outputDir, render.name, ext, s.overwrite);
@@ -211,7 +218,8 @@ export default function MotionGifs() {
       toast.info(`Batch export complete — ${total} file(s) saved`);
     } catch (e: any) {
       console.error(e);
-      toast.error(e?.message ? `Batch failed — ${e.message.split('\n')[0]}` : 'Batch failed.');
+      if (isCancelled()) toast.info('Cancelled.');
+      else toast.error(e?.message ? `Batch failed — ${e.message.split('\n')[0]}` : 'Batch failed.');
     } finally {
       end();
     }
@@ -222,11 +230,19 @@ export default function MotionGifs() {
     const s = loadGifSettings();
     if (!bins?.ok || runningRef.current || !s.outputDir) return;
     const path = window.require('path');
-    const res = await evalScript('var f = File.openDialog("Select a video"); f ? f.fsName : "null"');
-    if (!res || res === 'null') return;
+    // Multi-select dialog: returns an array of Files (or null on cancel).
+    const raw = await evalScript('var fs = File.openDialog("Select video(s)", undefined, true); var o = []; if (fs) for (var i = 0; i < fs.length; i++) o.push(fs[i].fsName); o.join("\\n")');
+    const files = (raw || '').split('\n').filter((f) => f && f !== 'null' && f !== 'undefined');
+    if (files.length === 0) return;
+    const total = files.length;
 
     begin('Probing video…');
+    let lastOutput = '';
     try {
+     for (let i = 0; i < total; i++) {
+      const res = files[i];
+      const tag = total > 1 ? `(${i + 1}/${total}) ` : '';
+      setStatus(`${tag}Probing video…`);
       // Resolve "as comp" against the source video's native metadata.
       let width = s.width;
       let fps = s.fps;
@@ -237,18 +253,32 @@ export default function MotionGifs() {
       }
 
       const base = path.basename(res).replace(/\.[^.]+$/, '') || 'output';
-      const output = versionedOutputPath(s.outputDir, base, outputExtForFormat(s.outputFormat), s.overwrite);
+      let output = versionedOutputPath(s.outputDir, base, outputExtForFormat(s.outputFormat), s.overwrite);
+      // "Overwrite" must never target the source itself (e.g. a .gif/.webm
+      // already in the output folder) — the encoder would truncate it.
+      if (path.resolve(output).toLowerCase() === path.resolve(res).toLowerCase()) {
+        output = versionedOutputPath(s.outputDir, base, outputExtForFormat(s.outputFormat), false);
+      }
 
-      setStatus('Starting…');
+      setStatus(`${tag}Starting…`);
+      // Each video gets an even slice of the shared progress bar.
       await convertVideoToGif(
         res,
-        { output, width, fps, quality: s.quality, loop: s.loopForever ? 0 : -1, keepFrames: s.keepFrames, format: s.outputFormat, tempDir: tempFramesDir() },
-        onProgress,
+        { output, width, fps, quality: s.quality, loop: s.loopForever ? 0 : -1, keepFrames: s.keepFrames, format: s.outputFormat, tempDir: `${tempFramesDir()}_${i}` },
+        (p) => onProgress({ percent: Math.round((i * 100 + p.percent) / total), message: tag + p.message }),
       );
-      afterExport(s, output);
+      lastOutput = output;
+     }
+      if (total === 1) afterExport(s, lastOutput);
+      else {
+        setPercent(100);
+        if (s.openFolder) revealFile(lastOutput);
+        toast.info(`Batch convert complete — ${total} file(s) saved`);
+      }
     } catch (e: any) {
       console.error(e);
-      toast.error(e?.message ? `Convert failed — ${e.message.split('\n')[0]}` : 'Convert failed.');
+      if (isCancelled()) toast.info('Cancelled.');
+      else toast.error(e?.message ? `Convert failed — ${e.message.split('\n')[0]}` : 'Convert failed.');
     } finally {
       end();
     }
@@ -307,9 +337,17 @@ export default function MotionGifs() {
             background: 'var(--panel-bg-elev)', color: 'var(--panel-fg)',
             cursor: ready ? 'pointer' : 'not-allowed', opacity: ready ? 1 : 0.6,
           }}>
-          Convert Existing Video
+          Convert Existing Video(s)
         </button>
       </div>
+
+      {running && (
+        <button onClick={() => { cancelExport(); setStatus('Cancelling…'); }}
+          title="Stop the current export (press Esc in AE to abort a blocking render)"
+          style={{ margin: '0 8px 8px', padding: '6px 8px', fontSize: 11, fontWeight: 700, borderRadius: 4, border: '1px solid var(--panel-border)', background: 'var(--danger)', color: '#fff', cursor: 'pointer' }}>
+          Stop
+        </button>
+      )}
 
       <div style={{ padding: 8, borderTop: '1px solid var(--panel-border)', background: 'var(--panel-bg-sunken)', display: 'flex', flexDirection: 'column', gap: 4 }}>
         <div style={{ height: 6, borderRadius: 3, background: 'var(--panel-bg-elev)', overflow: 'hidden' }}>

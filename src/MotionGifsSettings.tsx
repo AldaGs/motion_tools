@@ -23,6 +23,14 @@ export default function MotionGifsSettings() {
   };
 
   const browseOutput = async () => {
+    // Prefer CEP's native dialog: it uses the modern Windows folder picker.
+    // ExtendScript's Folder.selectDialog shows the legacy SHBrowseForFolder tree.
+    const fs = (window as any).cep?.fs;
+    if (fs?.showOpenDialogEx) {
+      const r = fs.showOpenDialogEx(false, true, 'Output folder', s.outputDir || '');
+      if (r && r.err === 0 && r.data && r.data.length) set('outputDir', r.data[0]);
+      return;
+    }
     const res = await evalScript('var f = Folder.selectDialog("Output folder"); f ? f.fsName : "null"');
     if (res && res !== 'null') set('outputDir', res);
   };
