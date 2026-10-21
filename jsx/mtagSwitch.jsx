@@ -1903,6 +1903,14 @@ function _mtagFlattenItems(nodes) {
 // over fills. Applies object opacity + blend mode at the layer level.
 // Group nodes are flattened (see _mtagFlattenItems); clipping groups become
 // masked layers.
+function _mtagImportsFolder() {
+    for (var i = 1; i <= app.project.numItems; i++) {
+        var it = app.project.item(i);
+        if (it instanceof FolderItem && it.name === "MATG_imports" && it.parentFolder === app.project.rootFolder) return it;
+    }
+    return app.project.items.addFolder("MATG_imports");
+}
+
 function mtagSwitchAeImport(jsonString) {
     try {
         var payload = JSON.parse(jsonString);
@@ -2266,6 +2274,12 @@ function mtagSwitchAeImport(jsonString) {
                         warnings.push("image import failed (" + (item.name || "image") + ", ." + ext + "): " + eImp.toString());
                     }
                     if (footageItem) {
+                        // Tag + file imports under MATG_imports so users see where they came from.
+                        var srcSuffix = (payload.origin && payload.origin.ref === "comp-center") ? "_ps" : "_ai";
+                        if (!/_(ps|ai)$/.test(footageItem.name.replace(/\.[^.]+$/, ""))) {
+                            footageItem.name = footageItem.name.replace(/(\.[^.]+)?$/, srcSuffix + "$1");
+                        }
+                        try { footageItem.parentFolder = _mtagImportsFolder(); } catch (eF) {}
                         var imgLayer = comp.layers.add(footageItem);
                         imgLayer.name = item.name || "Image";
                         _mtagOrderLayer(imgLayer);
